@@ -1,17 +1,20 @@
 importScripts("lib/lodash.min.js")
 importScripts("lib/es6-promise.auto.min.js")
 importScripts("lib/fetch.umd.js")
+importScripts("lib/robust-websocket.min.js")
 
 if(!console) {
     var console = {log: function() {}, error: function() {}, table: function() {}}
 }
+
+var APPSTATE = {}
 
 var N = 64  //num of pts in resampled path
 var NBest = 15
 
 var reservedWords = {}
 
-//word -> {path: point[], pathDistance: number}
+//word -> {word: word, path: point[], pathDistance: number}
 var DICTIONARY = {}
 
 // TODO: fix these hard code
@@ -104,27 +107,39 @@ var isAtoZ = function(c) {
     return (c >= 'a' && c <= 'z')||(c >= 'A' && c <= 'Z')
 }
 
+var toLowerCaseAlphaOnly = function(word) {
+    return _.filter(word, isAtoZ).join('').toLowerCase()
+}
+
 var wordToPath = function (word) {
-    //var lowerCaseAlphaOnly = _.filter(word, isAtoZ).join('').toLowerCase()
-    //if(lowerCaseAlphaOnly.length < 1) return []
     var centerCoords = _.map(word, function(c) {return CENTERS[c]})
     var simulatedPath = resample(centerCoords)
     return simulatedPath
 }
 
-var addToDictionary = function(word) {
-    //if(word in DICTIONARY) { return }
-    if(Object.prototype.hasOwnProperty.call(DICTIONARY, word)) { return }
-    //if(word.length === 1) { return }
-    var lowerCaseAlphaOnly = _.filter(word, isAtoZ).join('').toLowerCase()
+// return null if constructed path is invalid
+var wordToWordPathDistance = function(word) {
+    var lowerCaseAlphaOnly = toLowerCaseAlphaOnly(word)
     if(lowerCaseAlphaOnly.length <= 1) { return }
     var path = wordToPath(lowerCaseAlphaOnly)
     var pathDistance = totalDistance(path)
     if(pathDistance === 0) { return }
-    DICTIONARY[word] = {path: path, pathDistance: pathDistance}
+    return {
+        word: word,
+        path: path,
+        pathDistance: pathDistance
+    }
 }
 
-var _getCompletionsAtLoc = {}
+var addToDictionary = function(word) {
+    if(Object.prototype.hasOwnProperty.call(DICTIONARY, word)) { return }
+    var wordPathDistance = wordToWordPathDistance(word)
+    if(wordPathDistance) {
+        DICTIONARY[word] = wordPathDistance
+    }
+}
+
+var _getKeySuggestions = {}
 var startsWith = function(s, t) {
     return s.indexOf(t) == 0
 }
@@ -137,7 +152,7 @@ function sharedStart(array){
     return a1.substring(0, i);
 }
 
-_getCompletionsAtLoc['bash'] = function(cb) {
+_getKeySuggestions['bash'] = function(cb) {
     fetch('/line' + '?t=' + String(Date.now()))
         .then(function(resp) {
             return resp.json()
@@ -203,8 +218,6 @@ _getCompletionsAtLoc['bash'] = function(cb) {
                     completions = _.filter(reservedWords['bash'], function(word){
                         return startsWith(word, prefix) && word !== prefix
                     })
-                    reupdateCompleter = false
-                    addSpaceAtEnd = false
                 }
                 var data = {
                     completions: completions,
@@ -223,23 +236,74 @@ _getCompletionsAtLoc['bash'] = function(cb) {
         })
 }
 
-var getCompletionsAtLoc = function(cb) {
-    _getCompletionsAtLoc['bash'](cb)
+_getKeySuggestions['vim'] = function(cb) {
+    fetch('/nvim_autocomplete' + '?t=' + String(Date.now()))
+        .then(function(resp) {
+            return resp.json()
+        })
+        .then(function(json) {
+            var reupdateCompleter = true
+            var data = {
+                completions: json.data,
+                reupdateCompleter: reupdateCompleter,
+                addSpaceAtEnd: false,
+                prefix: '',
+            }
+            cb({data: data})
+        })
+        .catch(function(err) {
+            console.error(err)
+            postMessage({err: err.message})
+        })
+}
+
+var getKeySuggestions = function(cb) {
+    if(APPSTATE.mode === 'bash') {
+        _getKeySuggestions['bash'](cb)
+    } else if (APPSTATE.mode === 'vim') {
+        _getKeySuggestions['vim'](cb)
+    }
+}
+
+var _getSearchSpace = {}
+_getSearchSpace['bash'] = function(completions) {
+    return _(completions)
+        .map(function(word, index) {
+            return {
+                originalIndex: index,
+                wordPathDistance: DICTIONARY[word] || wordToWordPathDistance(word) 
+            }
+        })
+        .filter(function(item) { return item.wordPathDistance })
+        .map(function (item) {
+            return {
+                word: item.wordPathDistance.word,
+                path: item.wordPathDistance.path,
+                pathDistance: item.wordPathDistance.pathDistance,
+                originalIndex: item.originalIndex
+            }
+        })
+        .value()
+}
+
+_getSearchSpace['vim'] = function(completions) {
+    return _(completions)
+        .map(function(word, index) { return {originalIndex: index, wordPathDistance: wordToWordPathDistance(word) } })
+        .filter(function(item) { return item.wordPathDistance })
+        .map(function (item) {
+            return {
+                word: item.wordPathDistance.word,
+                path: item.wordPathDistance.path,
+                pathDistance: item.wordPathDistance.pathDistance,
+                originalIndex: item.originalIndex,
+            }
+        }).value()
 }
 
 var getSearchSpace = function(completions, mode) {
-    //var rw = reservedWords[mode] || []
-    return _(/*rw.concat*/(completions))
-              .filter(function(word) { return word.length > 1 && Object.prototype.hasOwnProperty.call(DICTIONARY, word)})
-              .map(function (word) {
-                    return {
-                        word: word,
-                        path: DICTIONARY[word].path,
-                        pathDistance: DICTIONARY[word].pathDistance
-                    }
-              }).value()
+    if (mode === 'bash') return _getSearchSpace['bash'](completions)
+    else if (mode === 'vim') return _getSearchSpace['vim'](completions)
 }
-
 
 function getNearestCenter(pt) {
     var dists = _.mapValues(CENTERS, function(v) { return dist(pt, v) })
@@ -247,7 +311,7 @@ function getNearestCenter(pt) {
     return _.min(dists, '1')[0]
 }
 
-var getSuggestions = function(inputpath, completions, mode, cb) {
+var gestureRecognize = function(inputpath, completions, mode, shouldAddToDictionary, cb) {
     var diff = function(g1, g2) {
         if(!g1 || !g2 || g1.length !== g2.length) {
             //error state...
@@ -272,7 +336,9 @@ var getSuggestions = function(inputpath, completions, mode, cb) {
     // if the whole path length is only a single character
     // output the character instead
 
-    completions.forEach(addToDictionary)
+    if(shouldAddToDictionary) {
+        completions.forEach(addToDictionary)
+    }
 
     var searchSpace = getSearchSpace(completions, mode)
 
@@ -305,7 +371,8 @@ var getSuggestions = function(inputpath, completions, mode, cb) {
             path: entry.path,
             score_full: scoreFullPath,
             score_partial: scorePartialPath,
-            portion: portion
+            portion: portion,
+            originalIndex: entry.originalIndex
         }
     })
 
@@ -315,21 +382,102 @@ var getSuggestions = function(inputpath, completions, mode, cb) {
     cb({data: r})
 }
 
-var getCompletions = function(cb) {
-    //search all the keywords
-    //var charsBefore = getCharsBefore(file, loc)
-    //var data = {completions: _.filter(dict, function(word){
-        //// return word.startsWith(charsBefore)
-        //return startsWith(word, charsBefore) && word !== charsBefore
-    //}),
-    //start: {line: loc.line, ch: loc.ch - charsBefore.length},
-    //end: loc}
+var _getSwipeSuggestions = {}
+_getSwipeSuggestions['bash'] = function(inputpath, isUpperCase, cb) {
+    fetch('/line' + '?t=' + String(Date.now()))
+        .then(function(resp) {
+            return resp.json()
+        })
+        .then(function(json) {
+            // postMessage({debug: 'line return'})
+            if(json.line.indexOf(' ') > -1) {
+                // postMessage({debug: 'b 1'})
+                return fetch('/autocomplete' + '?show_all=true&t=' + String(Date.now()))
+                    .then(function(resp) {
+                        return resp.json()
+                    })
+                    .then(function(json2) {
+                        // look for white space before point
+                        var prevSpacePos = json.line.slice(0, json.point).lastIndexOf(' ')
+                        if(prevSpacePos > -1) {
+                            var prevToken = json.line.slice(prevSpacePos+1, json.point)
+                        }
 
-    cb({
-        data: {
-            completions: reservedWords['bash'],
-        }
-    })
+                        if(json2.data.length > 1) {
+                            var prefix = sharedStart(json2.data.map(function(s) { return s.toLowerCase() }))
+                            if (prevToken) {
+                                var prevSlashPos = prevToken.lastIndexOf('/')
+                                if (prevSlashPos > -1) {
+                                    prefix = sharedStart([prefix, prevToken.slice(prevSlashPos+1).toLowerCase()])
+                                } else {
+                                    prefix = sharedStart([prefix, prevToken.toLowerCase()])
+                                }
+                            } else {
+                                prefix = ''
+                            }
+                            var reupdateCompleter = true
+                        } else if(json2.data.length === 0) {
+                            prefix = ''
+                        } else { // only one
+                            if(prevSpacePos > -1) {
+                                prefix = prevToken
+                                var reupdateCompleter = true
+                            } else {
+                                prefix = ''
+                            }
+                        }
+
+                        console.log("getSwipeSuggestions bash prefix 2:", prefix)
+                        var data = {
+                            completions: json2.data,
+                            shouldAddToDictionary: false,
+                            prefix: prefix,
+                            reupdateCompleter: reupdateCompleter,
+                            addSpaceAtEnd: false,
+                            isSwipe: true,
+                        }
+                        cb({data: data})
+                    })
+            } else {
+                cb({
+                    data: {
+                        completions: reservedWords['bash'],
+                        shouldAddToDictionary: true
+                    }
+                })
+            }
+        })
+}
+_getSwipeSuggestions['vim'] = function(inputpath, isUpperCase, cb) {
+    var firstChar = getNearestCenter(inputpath[0])
+    if(isUpperCase) firstChar = firstChar.toUpperCase()
+    fetch('/nvim_autocomplete' + '?first_char=' + firstChar + '&t=' + String(Date.now()))
+        .then(function(resp) {
+            return resp.json()
+        })
+        .then(function(json) {
+            var reupdateCompleter = true
+            var data = {
+                completions: json.data,
+                reupdateCompleter: reupdateCompleter,
+                addSpaceAtEnd: false,
+                prefix: '',
+                isSwipe: true,
+                shouldAddToDictionary: false,
+            }
+            cb({data: data})
+        })
+        .catch(function(err) {
+            console.error(err)
+            postMessage({err: err.message})
+        })
+}
+var getSwipeSuggestions = function(inputpath, isUpperCase, cb) {
+    if(APPSTATE.mode === 'bash') {
+        _getSwipeSuggestions['bash'](inputpath, isUpperCase, cb)
+    } else if (APPSTATE.mode === 'vim') {
+        _getSwipeSuggestions['vim'](inputpath, isUpperCase, cb)
+    }
 }
 
 var startListening = function() {
@@ -343,21 +491,57 @@ var startListening = function() {
             msg.args.push(callback)
         }
         switch(msg.fn) {
-            case "getSuggestions":
-                getSuggestions.apply(self, msg.args)
+            case "gestureRecognize":
+                gestureRecognize.apply(self, msg.args)
                 break
-            case "getCompletionsAtLoc":
-                getCompletionsAtLoc.apply(self, msg.args)
+            case "getKeySuggestions":
+                getKeySuggestions.apply(self, msg.args)
                 break
-            case "getCompletions":
-                getCompletions.apply(self, msg.args)
+            case "getSwipeSuggestions":
+                getSwipeSuggestions.apply(self, msg.args)
                 break
             default:
+                console.error("Unknown function:" + msg.fn)
                 break
         }
     }
 }
 
+var initializeWs = function(cb) {
+    var protocol = (location.protocol === 'https:') ? 'wss://' : 'ws://';
+    var socketURL = protocol + location.hostname + ((location.port) ? (':' + location.port) : '') + "/process_state";
+    var sock = new RobustWebSocket(socketURL);
+
+    sock.addEventListener('open', function () {
+        console.log("ws sock open");
+    });
+
+    sock.addEventListener('close', function() {
+        console.log("ws sock close, reconnecting");
+    });
+
+    sock.addEventListener('message', function (event) {
+        var data = event.data;
+        var origin = event.origin;
+        var lastEventId = event.lastEventId;
+        // handle message
+
+        console.log('process state ws message', event)
+        var data = JSON.parse(event.data)
+        var newMode = data.mode
+        var newPid = data.pid
+        var insideTmux = data.inside_tmux
+        if(APPSTATE.mode !== newMode || APPSTATE.pid !== newPid) {
+            // notify app.js
+            postMessage({process_state_change: {mode: newMode, insideTmux: insideTmux}})
+        }
+        APPSTATE.mode = newMode
+        APPSTATE.pid = newPid
+        APPSTATE.insideTmux = insideTmux
+    });
+
+    cb()
+}
 
 var initializeBash = function(cb) {
     var st = Date.now()
@@ -377,12 +561,9 @@ var initializeBash = function(cb) {
 }
 
 var initialize = function() {
-    // postMessage({debug: 'initialize'})
-    //var st = Date.now()
-    initializeBash(startListening)
-    // startListening()
-    //console.log(Date.now() - st)
-    // postMessage({debug: Date.now() - st})
+    initializeBash(function() {
+        initializeWs(startListening)
+    })
 }
 
 initialize()

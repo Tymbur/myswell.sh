@@ -21,10 +21,14 @@ import logging
 from loguru import logger
 from elftools.elf.elffile import ELFFile
 import pybcompgen
+import json
+from pathlib import Path
 
 from tenacity import retry, stop_after_attempt, wait_random, retry_if_exception_type, before_sleep_log
 from tenacity._utils import get_callback_name
 
+import ring
+import aio_msgpack_rpc
 
 try:
     libc=ctypes.CDLL("libc.so.6", use_errno=True)
@@ -152,9 +156,7 @@ def get_bash_line_retry(*args):
 def get_tmux_bash_pid(session):
     # out = subprocess.check_output(['tmux', 'list-panes', '-s', '-t', session, '-F', "#{pane_active} #{pane_pid}"])
     out = subprocess.check_output(['tmux', 'list-window', '-t', session, '-F', "#{window_active} #{pane_pid}"])
-    # print('out', out)
     out2 = [l.split(' ') for l in out.decode().splitlines()]
-    # print('out2', out2)
     for active, pid in out2:
         if active == '1':
             return int(pid)
@@ -232,9 +234,7 @@ def get_relevant_lib_and_offset(pid, symbol_name, is_pie=False):
             if sym:
                 relevant_lib = l
                 relevant_offset = sym
-                # print(l, '----->',  hex(sym))
             else:
-                # print(l, 'not found')
                 pass
         finally:
             f.close()
@@ -243,7 +243,6 @@ def get_relevant_lib_and_offset(pid, symbol_name, is_pie=False):
 def get_children_of_pid(pid):
     pid_childrens = defaultdict(set)
     pids = [int(x) for x in os.listdir('/proc/') if x.isdigit()]
-    # print('a', pids)
     for p in pids:
         try:
             with open('/proc/%s/stat' % p, 'r') as f:
@@ -251,12 +250,13 @@ def get_children_of_pid(pid):
                 rpar = data.rfind(')')
                 dset = data[rpar + 2 : ].split()
                 ppid = int(dset[1])
-                # print("Adding %s to %s's children" % (p, ppid))
                 pid_childrens[ppid].add(p)
         except Exception as e:
             pass
     return pid_childrens[pid]
 
+NVIM_BIN_PATH = shutil.which('nvim')
+BASH_BIN_PATH = shutil.which('bash')
 class BashInfo:
     def __init__(self, **kwargs):
         self.bash_pid = kwargs['bash_pid']
@@ -287,7 +287,24 @@ class BashInfo:
             rl_line_buffer_addr = self.rl_line_buffer_addr
             rl_point_addr = self.rl_point_addr
 
-        return bash_pid, rl_line_buffer_addr, rl_point_addr
+        return bash_pid, detected_tmux, rl_line_buffer_addr, rl_point_addr
+
+    def get_interacting_process_state(self):
+        bash_pid, inside_tmux, rl_line_buffer_addr, rl_point_addr = self.get_interacting_bash_state()
+        mode = 'bash'
+        pid = bash_pid
+
+        children_pids = get_children_of_pid(bash_pid)
+        if len(children_pids) == 1:
+            child_pid = children_pids.pop()
+            exe = os.readlink('/proc/%s/exe' % child_pid)
+            if exe != BASH_BIN_PATH:
+                if exe == NVIM_BIN_PATH:
+                    mode = 'vim'
+                    pid = child_pid
+
+        return mode, pid, inside_tmux, rl_line_buffer_addr, rl_point_addr
+
 
 class GetBashLineHandler(tornado.web.RequestHandler):
     def initialize(self, bash_info):
@@ -295,7 +312,7 @@ class GetBashLineHandler(tornado.web.RequestHandler):
 
     def get(self):
         try:
-            bash_pid, rl_line_buffer_addr, rl_point_addr = self.bash_info.get_interacting_bash_state()
+            bash_pid, _insdie_tmux, rl_line_buffer_addr, rl_point_addr = self.bash_info.get_interacting_bash_state()
             line, point = get_bash_line_retry(bash_pid, rl_line_buffer_addr, rl_point_addr)
         except Exception as e:
             logger.exception(e)
@@ -307,7 +324,6 @@ class GetBashLineHandler(tornado.web.RequestHandler):
             })
         finally:
             ptrace_detach(bash_pid)
-        # self.write("Hello world {} ".format(self.pid))
 
 class GetAllCommandHandler(tornado.web.RequestHandler):
     def get(self):
@@ -316,8 +332,8 @@ class GetAllCommandHandler(tornado.web.RequestHandler):
         })
 
 # Declared here because can't pickle lambda
-def get_pybcompgen_complete(line, cwd):
-    return pybcompgen.complete(line, cwd)
+def get_pybcompgen_complete(line, cwd, show_all):
+    return pybcompgen.complete(line, cwd, show_all)
 
 class AutoCompleteHandler(tornado.web.RequestHandler):
     def initialize(self, bash_info, executor):
@@ -326,7 +342,7 @@ class AutoCompleteHandler(tornado.web.RequestHandler):
 
     async def get(self):
         try:
-            bash_pid, rl_line_buffer_addr, rl_point_addr = self.bash_info.get_interacting_bash_state()
+            bash_pid, _insdie_tmux, rl_line_buffer_addr, rl_point_addr = self.bash_info.get_interacting_bash_state()
             line, point = get_bash_line_retry(bash_pid, rl_line_buffer_addr, rl_point_addr)
         except Exception as e:
             logger.exception(e)
@@ -340,12 +356,13 @@ class AutoCompleteHandler(tornado.web.RequestHandler):
             # logger.info('cwd: {}, {}'.format(readlink_dir, cwd))
             line = line[:point]
 
-            fut = IOLoop.current().run_in_executor(self.executor, get_pybcompgen_complete, line, cwd)
-            ret = await fut
+            if self.get_query_argument('show_all', None):
+                fut = IOLoop.current().run_in_executor(self.executor, get_pybcompgen_complete, line, cwd, True)
+            else:
+                fut = IOLoop.current().run_in_executor(self.executor, get_pybcompgen_complete, line, cwd, False)
+            ret = await asyncio.wait_for(fut, 2.0)
 
             ret.sort(key=lambda s: s.lower())
-
-            # TODO: limit ret to return only a few instead of all?
 
             self.write({
                 'data': ret,
@@ -356,6 +373,154 @@ class AutoCompleteHandler(tornado.web.RequestHandler):
             logger.error(e)
             raise tornado.web.HTTPError
 
+def get_nvim_unix_socket_by_pid(nvim_pid):
+    with open('/proc/%s/cmdline' % nvim_pid, 'r') as f:
+        cmdline = f.read()
+        cmdline = cmdline.split('\x00') # /proc/<PID>/cmdline separated by NULL
+
+    if '--listen' in cmdline:
+        # the socket is explicitly set in cmdline args
+        sock = cmdline[cmdline.index('--listen') + 1]
+        return sock
+    else:
+        # automatically check from /proc/<PID>/fd and find the unix socket
+        # NOTE: does not work on Android 10+ due to restriction of /proc/net
+        regex = r'socket:\[(\d+)\]'
+        proc_net_unix_lines_split =  [l.split(' ') for l in Path('/proc/net/unix').read_text().splitlines()]
+        for root, dirs, files in os.walk('/proc/' + str(nvim_pid) + '/fd'):
+            for f in files:
+                m = re.match(regex, os.readlink(root + '/' + f))
+                if m:
+                    for line in proc_net_unix_lines_split:
+                        if m.group(1) in line:
+                            return line[-1]
+
+    return None
+
+@ring.lru(force_asyncio=True)
+async def _get_nvim_client(nvim_pid):
+    nvim_sock = get_nvim_unix_socket_by_pid(nvim_pid)
+    if nvim_sock:
+        nvim = aio_msgpack_rpc.Client(*await asyncio.open_unix_connection(nvim_sock))
+        await nvim.call(b'nvim_set_option', 'pumheight', 1)
+        return nvim
+    return None
+
+async def get_nvim_client(nvim_pid):
+    ret = await _get_nvim_client(nvim_pid)
+    if ret is None:
+        _get_nvim_client.delete(nvim_pid)
+    return ret
+
+async def nvim_api_get_mode(nvim_pid):
+    nvim = await get_nvim_client(nvim_pid)
+    result = await nvim.call(b'nvim_get_mode')
+    return result
+
+async def nvim_get_complete_info(nvim_pid):
+    nvim = await get_nvim_client(nvim_pid)
+    result = await nvim.call('nvim_call_function', 'complete_info', [])
+    return result
+
+async def nvim_get_curr_line(nvim_pid):
+    nvim = await get_nvim_client(nvim_pid)
+    result = await nvim.call(b'nvim_get_current_line')
+    return result
+
+async def nvim_feedkeys(nvim_pid, key):
+    nvim = await get_nvim_client(nvim_pid)
+    result = await nvim.call('nvim_call_function', 'feedkeys', [key])
+    return result
+
+class NVimAutoCompleteHandler(tornado.web.RequestHandler):
+    def initialize(self, bash_info):
+        self.bash_info = bash_info
+
+    async def get(self):
+        mode, nvim_pid, _1, _2, _3 = bash_info.get_interacting_process_state()
+
+        if mode != 'vim':
+            self.write({
+                'data': [],
+                'line': '',
+                'point': 0,
+            })
+            return
+
+        try:
+            api_ret = await nvim_api_get_mode(nvim_pid)
+            if api_ret['blocking'] or not ('i' in api_ret['mode']):
+                # TODO: indicate it is not insert mode in client
+                self.write({
+                    'data': [],
+                    'line': '',
+                    'point': 0,
+                })
+                return
+
+            first_char = self.get_query_argument('first_char', None)
+            if not first_char:
+                result = await nvim_get_complete_info(nvim_pid)
+                ret = list(map(lambda i: i['word'], result['items']))
+            else:
+                await nvim_feedkeys(nvim_pid, first_char)
+                cnt = 0
+                while cnt < 10:
+                    await asyncio.sleep(0.1)
+                    result = await nvim_get_complete_info(nvim_pid)
+                    ret = list(map(lambda i: i['word'], result['items']))
+                    if ret:
+                        break
+                    else:
+                        cnt += 1
+
+            line = await nvim_get_curr_line(nvim_pid)
+            point = 0
+        except OSError as e:
+            if str(e) == 'EOF':
+                self.write({
+                    'data': [],
+                    'line': '',
+                    'point': 0,
+                })
+            else:
+                raise e
+        except Exception as e:
+            logger.exception(e)
+            raise tornado.web.HTTPError
+        else:
+            self.write({
+                'data': ret,
+                'line': line,
+                'point': point,
+            })
+
+async def nvim_select_popupmenu_item(nvim_pid, index, insert, finish, opts):
+    nvim = await get_nvim_client(nvim_pid)
+    result = await nvim.call('nvim_select_popupmenu_item', index, insert, finish, opts)
+    return result
+
+class NvimSelectSuggestionHandler(tornado.web.RequestHandler):
+    def initialize(self, bash_info):
+        self.bash_info = bash_info
+
+    async def post(self):
+        mode, nvim_pid, _1, _2, _3 = bash_info.get_interacting_process_state()
+        if mode != 'vim':
+            self.write('')
+            return
+        try:
+            self.nvim = await get_nvim_client(nvim_pid)
+            j = json.loads(self.request.body.decode('utf-8'))
+            index = j.get("index")
+
+            insert, finish = True, False if j.get("dont_finish", None) else True
+            opts = {}
+            await nvim_select_popupmenu_item(nvim_pid, index, insert, finish, opts)
+            self.write('')
+        except Exception as e:
+            logger.exception(e)
+            raise tornado.web.HTTPError
 
 def restart_program():
     # From https://www.daniweb.com/programming/software-development/code/260268/restart-your-python-program
@@ -365,9 +530,57 @@ def restart_program():
     python = sys.executable
     os.execl(python, python, *sys.argv)
 
+class ProcessStateChangeWebSocket(tornado.websocket.WebSocketHandler):
+    _connections = {}
+    _latest_state = {}
+
+    def check_origin(self, origin):
+        return True
+
+    def open(self):
+        self.connection_id = time.time()
+        self.__class__._connections[self.connection_id] = self
+        payload = json.dumps(self.__class__._latest_state)
+        self.write_message(payload)
+
+    def on_message(self, message):
+        pass
+
+    @classmethod
+    def broadcast(cls, item):
+        cls._latest_state = item
+
+        payload = json.dumps(item)
+        for cid, conn in cls._connections.items():
+            conn.write_message(payload)
+
+    def on_close(self):
+        del self.__class__._connections[self.connection_id]
+
+def notify_process_change(bash_info, ioloop):
+    mode, pid, inside_tmux, _1, _2 = bash_info.get_interacting_process_state()
+    item = {'pid': pid, 'mode': mode, 'inside_tmux': inside_tmux}
+    ioloop.add_callback(ProcessStateChangeWebSocket.broadcast, item)
+
 class MyTermSocket(TermSocket):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def initialize(self, bash_info, **kwargs):
+        self.bash_info = bash_info
+        super().initialize(**kwargs)
+
+    def check_origin(self, origin):
+        return True
+
+    def on_pty_read(self, text):
+        super().on_pty_read(text)
+
+        curr_loop = IOLoop.current()
+
+        # debounce
+        if hasattr(curr_loop, 'timeout_callback') and curr_loop.timeout_callback:
+            curr_loop.remove_timeout(curr_loop.timeout_callback)
+            curr_loop.timeout_callback = None
+
+        curr_loop.timeout_callback = curr_loop.call_later(0.5, notify_process_change, self.bash_info, curr_loop)
 
     def on_pty_died(self):
         super().on_pty_died()
@@ -376,7 +589,6 @@ class MyTermSocket(TermSocket):
 
         # get all child pids (by ProcessPoolExecutor)
         children_pids = get_children_of_pid(os.getpid())
-        # print("children_pids", os.getpid(), children_pids)
 
         for pid in children_pids:
             os.kill(pid, signal.SIGTERM)
@@ -441,9 +653,6 @@ if __name__ == '__main__':
         rl_line_buffer_lib, rl_line_buffer_offset = get_relevant_lib_and_offset(bash_pid, 'rl_line_buffer', bash_is_pie)
         rl_point_lib, rl_point_offset = get_relevant_lib_and_offset(bash_pid, 'rl_point', bash_is_pie)
 
-        # print('1', rl_line_buffer_lib, rl_line_buffer_offset)
-        # print('2', rl_point_lib, rl_point_offset)
-
         if rl_line_buffer_lib and rl_point_lib and rl_line_buffer_offset and rl_point_offset:
             rl_line_buffer_addr = get_base_addr_of_loaded_dynamic_lib(bash_pid, rl_line_buffer_lib) + rl_line_buffer_offset
             rl_point_addr = get_base_addr_of_loaded_dynamic_lib(bash_pid, rl_point_lib) + rl_point_offset
@@ -474,11 +683,19 @@ if __name__ == '__main__':
     else:
         executor = concurrent.futures.ProcessPoolExecutor()
 
+    ProcessStateChangeWebSocket._latest_state = {'pid': bash_pid, 'mode': 'bash', 'inside_tmux': False}
+
     handlers = [
-        (r"/websocket", MyTermSocket, {'term_manager': term_manager}),
+        (r"/websocket", MyTermSocket, {'term_manager': term_manager, 'bash_info': bash_info}),
+        (r"/process_state", ProcessStateChangeWebSocket),
+        # Bash related
         (r"/compgen", GetAllCommandHandler),
         (r"/line", GetBashLineHandler, {'bash_info': bash_info}),
         (r"/autocomplete", AutoCompleteHandler, {'bash_info': bash_info, 'executor': executor}),
+        # NeoVim related
+        (r"/nvim_autocomplete", NVimAutoCompleteHandler, {'bash_info': bash_info}),
+        (r"/nvim_select_suggestion", NvimSelectSuggestionHandler, {'bash_info': bash_info}),
+        # Static files
         (r"/()", tornado.web.StaticFileHandler, {'path':'./static/index.html'}),
         (r"/(.*)", tornado.web.StaticFileHandler, {'path':'./static/'}),
     ]

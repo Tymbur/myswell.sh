@@ -1,3 +1,8 @@
+window.APPSTATE = {
+    mode: 'bash',
+    insideTmux: false,
+}
+
 var nullfn = function () {
     console.log("called nullfn")
     return null;
@@ -7,19 +12,13 @@ function isNullOrUndefined(x) {
     return _.isUndefined(x) || _.isNull(x);
 }
 
-var updateCompleter = function(suggestions, prefix, reupdateCompleter, addSpaceAtEnd) {
-    if(!prefix) prefix = ''
-    if(isNullOrUndefined(reupdateCompleter)) reupdateCompleter = false
-    if(isNullOrUndefined(addSpaceAtEnd)) addSpaceAtEnd = false
-
+var _updateCompleter = {}
+_updateCompleter['bash'] = function(suggestions, prefix, reupdateCompleter, addSpaceAtEnd, isSwipe) {
     var c = document.getElementById('completer')
-
     var s = ["<ul class='candidates'>"]
-
     suggestions.forEach(function (sugg) {
-        s.push("<li class='suggestion' data-value='"+ sugg  +"'><strong>" + sugg  + "</strong></li>")
+        s.push("<li class='suggestion' data-value='"+ sugg.word  +"'><strong>" + sugg.word  + "</strong></li>")
     })
-
     s.push("</ul>")
 
     requestAnimationFrame(function(){
@@ -27,6 +26,7 @@ var updateCompleter = function(suggestions, prefix, reupdateCompleter, addSpaceA
         c.innerHTML = s.join('')
         c.scrollLeft = 0
         var lastInput = prefix
+        var firstClick = true
         $('.suggestion').on('click', function (evt) {
             var word = evt.currentTarget.dataset.value
             if(lastInput) {
@@ -36,10 +36,76 @@ var updateCompleter = function(suggestions, prefix, reupdateCompleter, addSpaceA
             if(addSpaceAtEnd) {
                 lastInput += ' ' // input an extra space at the end
             }
-            Terminal.insertWord(lastInput, reupdateCompleter)
+            Terminal.insertWord(lastInput, (firstClick && isSwipe) ? false : reupdateCompleter)
+            if(firstClick) firstClick = false
         })
     })
 }
+
+_updateCompleter['vim'] = function(suggestions, prefix, reupdateCompleter, addSpaceAtEnd, isSwipe) {
+    var c = document.getElementById('completer')
+    var s = ["<ul class='candidates'>"]
+    if(!isSwipe && suggestions.length > 0) {
+        s.push("<li class='suggestion refresh-suggestion'>&circlearrowright;</li>")
+    }
+    suggestions.forEach(function (sugg) {
+        s.push("<li class='suggestion' data-index='"+ sugg.index  +"'><strong>" + sugg.word  + "</strong></li>")
+    })
+    s.push("</ul>")
+    requestAnimationFrame(function(){
+        c.innerHTML = ''
+        c.innerHTML = s.join('')
+        var refreshEl = document.querySelector('.suggestion, .refresh-suggestion')
+        if (refreshEl && !isSwipe) {
+            c.scrollLeft = refreshEl.offsetWidth - 4
+        } else {
+            c.scrollLeft = 0
+        }
+        var firstClick = true
+        $('.refresh-suggestion').on('click', function(evt) {
+            // looks like if too fast, will err
+            Terminal.insertCtrl('X')();
+            setTimeout(Terminal.insertCtrl('F'), 300);
+            setTimeout(autocompletefn, 500);
+        })
+        $('.suggestion:not(.refresh-suggestion)').on('click', function (evt) {
+            var index = evt.currentTarget.dataset.index;
+
+            var body = {index: Number(index)}
+            if(isSwipe) body.dont_finish = true
+
+            fetch('/nvim_select_suggestion', {
+                method: 'POST',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(body)
+            }).then(function(resp) {
+                if(!(firstClick && isSwipe)) {
+                    autocompletefn()
+                }
+                if(firstClick) firstClick = false
+            }).catch(function(err) {
+                console.error("nvim_select_suggestion error:", err);
+            })
+        })
+    })
+}
+
+var updateCompleter = function(suggestions, prefix, reupdateCompleter, addSpaceAtEnd, isSwipe) {
+    if(!prefix) prefix = ''
+    if(isNullOrUndefined(reupdateCompleter)) reupdateCompleter = false
+    if(isNullOrUndefined(addSpaceAtEnd)) addSpaceAtEnd = false
+    if(isNullOrUndefined(isSwipe)) isSwipe = false
+
+    if (window.APPSTATE.mode === 'bash') {
+        _updateCompleter['bash'](suggestions, prefix, reupdateCompleter, addSpaceAtEnd, isSwipe)
+    } else if (window.APPSTATE.mode === 'vim') {
+        _updateCompleter['vim'](suggestions, prefix, reupdateCompleter, addSpaceAtEnd, isSwipe)
+    }
+}
+
 var showErrorCompleter = function(err) {
     var c = document.getElementById('completer')
     requestAnimationFrame(function(){
@@ -65,6 +131,12 @@ var Analyzer = (function() {
                 } else if(msg.debug.clearPath) {
                     clearPath()
                 }
+            } else if(msg.process_state_change){
+                console.log('process_state_change', msg.process_state_change)
+                window.APPSTATE.mode = msg.process_state_change.mode
+                window.APPSTATE.insideTmux = msg.process_state_change.insideTmux
+                Keyboard.switchMode(window.APPSTATE.mode)
+                autocompletefn()
             } else {
                 if(msg.err) {
                     promiseReject(msg.err)
@@ -92,32 +164,38 @@ var Analyzer = (function() {
         return promise
     }
 
-    var getSuggestions = function(inputpath, completions, mode) {
-        return makeWWPromise({fn: "getSuggestions", args: [inputpath, completions, mode]})
+    var gestureRecognize = function(inputpath, completions, mode, shouldAddToDictionary) {
+        return makeWWPromise({fn: "gestureRecognize", args: [inputpath, completions, mode, shouldAddToDictionary]})
     }
 
-    var getCompletions= function() {
-        return makeWWPromise({fn: "getCompletions", args: []})
+    var getSwipeSuggestions = function(inputpath, isUpperCase) {
+        return makeWWPromise({fn: "getSwipeSuggestions", args: [inputpath, isUpperCase]})
     }
 
-    var getCompletionsAtLoc = function() {
-        return makeWWPromise({fn: "getCompletionsAtLoc", args: []})
+    var getKeySuggestions = function() {
+        return makeWWPromise({fn: "getKeySuggestions", args: []})
     }
 
     return {
         initialize: initialize,
-        getSuggestions: getSuggestions,
-        getCompletionsAtLoc: getCompletionsAtLoc,
-        getCompletions: getCompletions,
+        gestureRecognize: gestureRecognize,
+        getKeySuggestions: getKeySuggestions,
+        getSwipeSuggestions: getSwipeSuggestions,
     }
 })()
 Analyzer.initialize()
 
 var autocompletefn = _.debounce(function() {
-    Analyzer.getCompletionsAtLoc()
+    Analyzer.getKeySuggestions()
         .then(function(data) {
             if(data.completions && data.completions.length > 0) {
-                updateCompleter(data.completions.slice(0,10), data.prefix, data.reupdateCompleter, data.addSpaceAtEnd)
+                var compl = data.completions.slice(0,10).map(function(word, index) {
+                    return {
+                        word: word,
+                        index: index
+                    }
+                })
+                updateCompleter(compl, data.prefix, data.reupdateCompleter, data.addSpaceAtEnd)
             } else {
                 updateCompleter([]) //clear it
             }
@@ -125,18 +203,21 @@ var autocompletefn = _.debounce(function() {
             console.log('autocompletefn err:', err)
             showErrorCompleter("Can't fetch from server, please try again...");
         })
-}, 300)
+}, 150)
 
 var Terminal = (function(term) {
+    var xtermDataHandler = function(s) {
+        term._core._coreService.triggerDataEvent(s, true)
+    }
     var delGroupBefore = function() {
-        term._core.handler('\x17') // CTRL-W
+        xtermDataHandler('\x17') // CTRL-W
         autocompletefn()
     }
     var insertWord = function(word, shouldUpdateCompleter) {
         if(typeof shouldUpdateCompleter === 'undefined') shouldUpdateCompleter = true
         for(var i = 0; i < word.length; i++) {
             var c = word[i]
-            term._core.handler(c[0]);
+            xtermDataHandler(c[0]);
         }
         if(shouldUpdateCompleter) {
             autocompletefn()
@@ -144,14 +225,14 @@ var Terminal = (function(term) {
     }
     var insert = function(c) {
         return function(){
-            term._core.handler(c[0]);
+            xtermDataHandler(c[0]);
             autocompletefn()
         }
     }
     var insertSp = function(which, shouldUpdateCompleter) {
         return function(){
             if(typeof shouldUpdateCompleter === 'undefined') shouldUpdateCompleter = true
-            term._core.handler(String.fromCharCode(which));
+            xtermDataHandler(String.fromCharCode(which));
 
             if(shouldUpdateCompleter) {
                 autocompletefn()
@@ -160,36 +241,36 @@ var Terminal = (function(term) {
     }
     var insertSp2 = function(which) {
         return function(){
-            term._core.handler(String.fromCharCode(0x1b) + which);
+            xtermDataHandler(String.fromCharCode(0x1b) + which);
 
             autocompletefn()
         }
     }
     var insertCtrl = function(c) {
         return function(){
-            term._core.handler(String.fromCharCode(c.charCodeAt(0) - 64))
+            xtermDataHandler(String.fromCharCode(c.charCodeAt(0) - 64))
             autocompletefn()
         }
     }
     var insertAlt = function(c) {
         return function(){
-            term._core.handler(String.fromCharCode(0x1b) + c[0].toLowerCase())
+            xtermDataHandler(String.fromCharCode(0x1b) + c[0].toLowerCase())
             autocompletefn()
         }
     }
     var setFontSize = function(size) {
         var termContainer = term.element.parentElement
         var origHeight = termContainer.offsetHeight;
-        termContainer.style.height = origHeight + "px";
         term.setOption("fontSize", size)
-        term.fit();
+        termContainer.style.height = origHeight + "px";
+        term.fitAddon.fit()
         setTimeout(function() {
             term.scrollToBottom();
         }, 0)
     }
     var configFontSize = function() {
         function genSelect() {
-            var fontSize = localStorage.getItem('terminal-font-size') || 12;
+            var fontSize = localStorage.getItem('terminal-font-size') || window.DEFAULT_FONT_SIZE;
             fontSize = Number(fontSize)
             return '<select>' +
                         '<option value="12"' + (fontSize === 12 ? 'selected' : '')  + '>12</option>' +
@@ -197,6 +278,7 @@ var Terminal = (function(term) {
                         '<option value="16"' + (fontSize === 16 ? 'selected' : '')  + '>16</option>' +
                         '<option value="18"' + (fontSize === 18 ? 'selected' : '')  + '>18</option>' +
                         '<option value="20"' + (fontSize === 20 ? 'selected' : '')  + '>20</option>' +
+                        '<option value="22"' + (fontSize === 22 ? 'selected' : '')  + '>22</option>' +
                     '</select>'
         }
         iziToast.info({
@@ -245,7 +327,7 @@ var Terminal = (function(term) {
                 ['<button><b>Confirm</b></button>', function (instance, toast, button, e, inputs) {
                     var text = inputs[0].value;
                     console.log('Text field: ' + text);
-                    term._core.handler(text);
+                    xtermDataHandler(text);
                     instance.hide({ transitionOut: 'fadeOut' }, toast, 'button');
                 }, false], // true to focus
             ]
@@ -408,16 +490,24 @@ var Keyboard = (function (Terminal, Analyzer) {
             swipePath.addPt({x: currPt.x * _canvas.width, y: currPt.y * _canvas.height})
 
             var inputpath = swipePath.getInputPath()
-            Analyzer.getCompletions()
+            var intermediateData
+            Analyzer.getSwipeSuggestions(inputpath, Keyboard.isUpperCase())
             .then(function(data) {
-                return Analyzer.getSuggestions(inputpath, data.completions, 'bash')
+                intermediateData = data
+                var shouldAddToDictionary = isNullOrUndefined(data.shouldAddToDictionary) ? true : data.shouldAddToDictionary
+                return Analyzer.gestureRecognize(inputpath, data.completions, APPSTATE.mode, shouldAddToDictionary)
             }).then(function(completions){
                 // console.log(completions)
-                var compl = _.pluck(completions, 'word')
+                var compl = _.map(completions, function(c) {
+                    return {
+                        word: c.word,
+                        index: c.originalIndex
+                    }
+                })
                 if(compl.length > 0) {
-                    updateCompleter(compl)
+                    updateCompleter(compl, intermediateData.prefix, intermediateData.reupdateCompleter, intermediateData.addSpaceAtEnd, intermediateData.isSwipe)
 
-                    // input the first suggestion
+                    // input the first suggestion, the firstClick flag will prevent reupdateCompleter
                     requestAnimationFrame(function(){
                         $('.suggestion').first().trigger('click')
                     })
@@ -548,1468 +638,1014 @@ var Keyboard = (function (Terminal, Analyzer) {
     var RepeatSpaceAction = makeRepeatAction(Terminal.insert(' '), 100, true, 10, 30)
     var RepeatCursorDownAction = makeRepeatAction(Terminal.moveCursorDown, 200, false)
 
+    // normal size key
+    var makeKey = function(fn, swipable, key, id) {
+        id = id ? id : key
+        return {
+            keyid: id, keytext: key, w: 0.1, h: 0.25,
+            click: fn,
+            timeout: 400 /*ms*/,
+            swipe: swipable ?
+                {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up } :
+                {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
+            longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn }
+        }
+    }
+
+    var makeRegularKey = function(key, id) {
+        var swipable = true
+        return makeKey(Terminal.insert(key), swipable, key, id)
+    }
+    var makeRegularNonSwipableKey = function(key, id) {
+        var swipable = false
+        return makeKey(Terminal.insert(key), swipable, key, id)
+    }
+
+    var makeUppercaseKey = function(key) {
+        var swipable = true
+        return makeKey(function() {Terminal.insert(key)(); switchLayout(0)}, swipable, key)
+    }
+
+    var makeCtrlKey = function(key) {
+        var swipable = false
+        return makeKey(function() {Terminal.insertCtrl(key.toUpperCase())(); switchLayout(0)}, swipable, key, 'ctrl-'+key)
+    }
+
+    var makeAltKey = function(key, id) {
+        id = id ? id : key
+        var swipable = false
+        return makeKey(function() {Terminal.insertAlt(key)(); switchLayout(0)},
+                       swipable, key, 'alt-'+id)
+    }
+
+    var modifyKeyLongPress = function(key, enter, move, up) {
+        var newKey = key
+        if (enter) newKey.longpress.onEnter = enter
+        if (move) newKey.longpress.onMove = move
+        if (up) newKey.longpress.onUp = up
+        return newKey
+    }
+
+    var tmuxShortcutFn = function(key) {
+        var tmuxPrefix = 'b'
+        return function() {
+            if (window.APPSTATE.insideTmux) {
+                Terminal.insertCtrl(tmuxPrefix.toUpperCase())();
+                Terminal.insert(key)();
+            }
+        }
+    }
+
+    var nothingCnt = 0
+    var makeNothingKey = function() {
+        nothingCnt++;
+        var swipable = false
+        return makeKey(nullfn, swipable, ' ', 'nothing'+nothingCnt)
+    }
+
+    var makeKeyRow = function(cxOffset, cy, keys) {
+        keys = _.cloneDeep(keys)
+        var cx = cxOffset
+        var row = keys.map(function(key) {
+            cx += key.w / 2
+            key.cx = cx
+            key.cy = cy
+            cx += key.w / 2
+            return key
+        })
+
+        return row
+    }
+
+    /// Special Keys:
+
+    var shiftKey = {keyid: 'shift', keytext: '⇧', w: 0.15, h: 0.25,
+        click: function() { switchLayout(1) },
+        timeout: 99999,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var unshiftKey = {keyid: 'unshift', keytext: '⇪', w: 0.15, h: 0.25,
+        click: function() { switchLayout(0) },
+        timeout: 99999,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var backspaceKey = {keyid: 'bs', keytext: '⌫', w: 0.15, h: 0.25,
+        click: Terminal.backspace,
+        timeout: 200,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.delGroupBefore},
+        longpress: {onEnter: RepeatBackspaceAction.start, onMove: RepeatBackspaceAction.move, onUp: RepeatBackspaceAction.up } }
+
+    var tosymKey = {keyid: 'tosym', keytext: '&123', w: 0.15, h: 0.25, fontSize: '1.5rem',
+        click: function() { switchLayout(2) },
+        timeout: 99999,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var nextsymKey = {keyid: 'nextsym', keytext: '→', w: 0.15, h: 0.25,
+        click: function() { switchLayout(3) },
+        timeout: 99999,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var cursorKey = {keyid: 'cursor', keytext: '✥', w:0.1, h: 0.25, bw: 0.05, bh: 0.125,
+        click: Terminal.moveCursorLeft,
+        timeout: 500 /*ms*/,
+        swipe: {onEnter: CursorAction.start, onMove: CursorAction.move, onUp: CursorAction.up },
+        longpress: {onEnter: RepeatCursorDownAction.start, onMove: RepeatCursorDownAction.move, onUp: RepeatCursorDownAction.up } }
+
+    var ctrlKey = {keyid: 'ctrl', keytext: 'ctrl', w:0.1, h: 0.25, fontSize: '1.5rem',
+        click: function() { switchLayout(4) },
+        timeout: 400 /*ms*/,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var altKey = {keyid: 'alt', keytext: 'alt', w:0.1, h: 0.25, fontSize: '1.5rem',
+        click: function() { switchLayout(5) },
+        timeout: 400 /*ms*/,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var spacebarKey = {keyid: 'sp', keytext: ' ', w: 0.3, h: 0.25,
+        click: Terminal.insert(' '),
+        timeout: 200,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.insertSoftTab},
+        longpress: {onEnter: RepeatSpaceAction.start, onMove: RepeatSpaceAction.move, onUp: RepeatSpaceAction.up } }
+
+    var newlineKey = {keyid: 'nl', keytext: '↩', w: 0.15, h: 0.25,
+        click: function() {Terminal.newLine();},
+        timeout: 200,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: RepeatNewlineAction.start, onMove: RepeatNewlineAction.move, onUp: RepeatNewlineAction.up } }
+
+    var abcKey = {keyid: 'abc', keytext: 'abc', w: 0.15, h: 0.25,
+        click: function() { switchLayout(0) },
+        timeout: 99999,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var escapeKey = {keyid: 'escape', keytext: 'esc', w:0.1, h: 0.25, fontSize: '1.5rem',
+        click: Terminal.escape,
+        timeout: 500 /*ms*/,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var altsym1Key = {keyid: 'alt-sym1', keytext: 'alt', w:0.1, h: 0.25, fontSize: '1.5rem',
+        click: function() { switchLayout(6) },
+        timeout: 400 /*ms*/,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var setfontsizeKey = {keyid: 'set-font-size', keytext: 'T+', w: 0.1, h: 0.25,
+        click: function() { Terminal.configFontSize(); },
+        timeout: 400 /*ms*/,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var inputtextKey = {keyid: 'input-text', keytext: '🌐', w: 0.1, h: 0.25,
+        click: function() {Terminal.inputNonEnglish();},
+        timeout: 400 /*ms*/,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var prevsymKey = {keyid: 'prevsym', keytext: '←', w: 0.15, h: 0.25,
+        click: function() { switchLayout(2) },
+        timeout: 99999,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var delKey = {keyid: 'del', keytext: 'del', w:0.1, h: 0.25, fontSize: '1.5rem',
+        click: Terminal.deleteKey,
+        timeout: 400 /*ms*/,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var altsym2Key = {keyid: 'alt-sym2', keytext: 'alt', w:0.1, h: 0.25, fontSize: '1.5rem',
+        click: function() { switchLayout(7) },
+        timeout: 400 /*ms*/,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var unctrlKey = {keyid: 'unctrl', keytext: 'CTRL', w:0.1, h: 0.25, fontSize: '1.1rem',
+        click: function() { switchLayout(0) },
+        timeout: 400 /*ms*/,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var unaltKey = {keyid: 'unalt', keytext: 'ALT', w:0.1, h: 0.25, fontSize: '1.1rem',
+        click: function() { switchLayout(0) },
+        timeout: 400 /*ms*/,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var altnextsymKey = {keyid: 'alt-nextsym', keytext: '→', w: 0.15, h: 0.25,
+        click: function() { switchLayout(7) },
+        timeout: 99999,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var altprevsymKey = {keyid: 'alt-prevsym', keytext: '←', w: 0.15, h: 0.25,
+        click: function() { switchLayout(6) },
+        timeout: 99999,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var altprevsymKey = {keyid: 'alt-prevsym', keytext: '←', w: 0.15, h: 0.25,
+        click: function() { switchLayout(6) },
+        timeout: 99999,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var pasteKey = {keyid: 'paste', keytext: '📋', w: 0.1, h: 0.25,
+        click: function() {
+            var clipboard = navigator.clipboard;
+            if (clipboard == undefined) {
+                console.log('clipboard is undefined');
+                iziToast.show({
+                    message: 'Clipboard not supported (Chrome & https/localhost only)',
+                    position: 'topRight',
+                })
+            } else {
+                clipboard.readText().then(function(text) {
+                    Terminal.insertWord(text, true);
+                })
+            }
+
+        },
+        timeout: 99999,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    var copyKey = {keyid: 'copy', keytext: '✂️', w: 0.1, h: 0.25,
+        click: function() {
+            var w = window.open()
+
+            w.document.write('<meta name="viewport" content="width=device-width" />' + '<pre>' + term.serializeAddon.serialize() + '</pre>')
+        },
+        timeout: 99999,
+        swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
+        longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
+
+    /////////
+
+    var _currMode = 'bash'
     var _currLayout = 0
-    var _layoutsConfig = [
+    var _layoutsConfig = {}
+    _layoutsConfig['bash'] = [
         // layout 0
-        [
-            {keyid: 'q', keytext: 'q', cx: 0.05, cy: 1/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('q'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'w', keytext: 'w', cx: 0.15, cy: 1/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('w'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'e', keytext: 'e', cx: 0.25, cy: 1/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('e'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'r', keytext: 'r', cx: 0.35, cy: 1/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('r'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 't', keytext: 't', cx: 0.45, cy: 1/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('t'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'y', keytext: 'y', cx: 0.55, cy: 1/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('y'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'u', keytext: 'u', cx: 0.65, cy: 1/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('u'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'i', keytext: 'i', cx: 0.75, cy: 1/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('i'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'o', keytext: 'o', cx: 0.85, cy: 1/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('o'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'p', keytext: 'p', cx: 0.95, cy: 1/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('p'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'a', keytext: 'a', cx: 0.1, cy: 3/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('a'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 's', keytext: 's', cx: 0.2, cy: 3/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('s'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'd', keytext: 'd', cx: 0.3, cy: 3/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('d'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'f', keytext: 'f', cx: 0.4, cy: 3/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('f'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'g', keytext: 'g', cx: 0.5, cy: 3/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('g'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'h', keytext: 'h', cx: 0.6, cy: 3/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('h'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'j', keytext: 'j', cx: 0.7, cy: 3/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('j'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'k', keytext: 'k', cx: 0.8, cy: 3/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('k'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'l', keytext: 'l', cx: 0.9, cy: 3/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('l'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'z', keytext: 'z', cx: 0.2, cy: 5/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('z'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'x', keytext: 'x', cx: 0.3, cy: 5/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('x'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'c', keytext: 'c', cx: 0.4, cy: 5/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('c'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'v', keytext: 'v', cx: 0.5, cy: 5/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('v'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'b', keytext: 'b', cx: 0.6, cy: 5/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('b'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'n', keytext: 'n', cx: 0.7, cy: 5/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('n'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'm', keytext: 'm', cx: 0.8, cy: 5/8, w: 0.1, h: 0.25,
-                click: Terminal.insert('m'),
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'shift', keytext: '⇧', cx: 0.075, cy: 5/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(1) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'bs', keytext: '⌫', cx: 0.925, cy: 5/8, w: 0.15, h: 0.25,
-                click: Terminal.backspace,
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.delGroupBefore},
-                longpress: {onEnter: RepeatBackspaceAction.start, onMove: RepeatBackspaceAction.move, onUp: RepeatBackspaceAction.up } },
-            {keyid: 'tosym', keytext: '&123', cx: 0.075, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(2) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nl', keytext: '↩', cx: 0.925, cy: 7/8, w: 0.15, h: 0.25,
-                click: Terminal.newLine,
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: RepeatNewlineAction.start, onMove: RepeatNewlineAction.move, onUp: RepeatNewlineAction.up } },
-            {keyid: 'sp', keytext: ' ', cx: 0.5, cy: 7/8, w: 0.3, h: 0.25,
-                click: Terminal.insert(' '),
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.insertSoftTab},
-                longpress: {onEnter: RepeatSpaceAction.start, onMove: RepeatSpaceAction.move, onUp: RepeatSpaceAction.up } },
-            {keyid: 'dot', keytext: '.', cx: 0.8, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insert('.')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'dash', keytext: '-', cx: 0.7, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insert('-')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'cursor', keytext: '✥', cx: 0.2, cy: 7/8, w:0.1, h: 0.25,
-                click: Terminal.moveCursorLeft,
-                timeout: 500 /*ms*/,
-                swipe: {onEnter: CursorAction.start, onMove: CursorAction.move, onUp: CursorAction.up },
-                longpress: {onEnter: RepeatCursorDownAction.start, onMove: RepeatCursorDownAction.move, onUp: RepeatCursorDownAction.up } },
-            {keyid: 'ctrl', keytext: 'ctrl', cx: 0.3, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: function() { switchLayout(4) },
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
-        ],
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeRegularKey('q'),
+                makeRegularKey('w'),
+                makeRegularKey('e'),
+                makeRegularKey('r'),
+                makeRegularKey('t'),
+                makeRegularKey('y'),
+                makeRegularKey('u'),
+                makeRegularKey('i'),
+                makeRegularKey('o'),
+                modifyKeyLongPress(makeRegularKey('p'), tmuxShortcutFn('p')),
+            ]),
+            makeKeyRow(0.05, 3/8, [
+                makeRegularKey('a'),
+                makeRegularKey('s'),
+                makeRegularKey('d'),
+                makeRegularKey('f'),
+                makeRegularKey('g'),
+                makeRegularKey('h'),
+                makeRegularKey('j'),
+                makeRegularKey('k'),
+                makeRegularKey('l'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                shiftKey,
+                makeRegularKey('z'),
+                makeRegularKey('x'),
+                makeRegularKey('c'),
+                makeRegularKey('v'),
+                makeRegularKey('b'),
+                modifyKeyLongPress(makeRegularKey('n'), tmuxShortcutFn('n')),
+                makeRegularKey('m'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                tosymKey,
+                cursorKey,
+                ctrlKey,
+                spacebarKey,
+                makeRegularNonSwipableKey('-', 'dash'),
+                makeRegularNonSwipableKey('.', 'dot'),
+                newlineKey,
+            ])
+
+        ]),
         // layout 1 - SHIFT
-        [
-            {keyid: 'Q', keytext: 'Q', cx: 0.05, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('Q')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'W', keytext: 'W', cx: 0.15, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('W')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'E', keytext: 'E', cx: 0.25, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('E')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'R', keytext: 'R', cx: 0.35, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('R')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'T', keytext: 'T', cx: 0.45, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('T')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'Y', keytext: 'Y', cx: 0.55, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('Y')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'U', keytext: 'U', cx: 0.65, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('U')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'I', keytext: 'I', cx: 0.75, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('I')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'O', keytext: 'O', cx: 0.85, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('O')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'P', keytext: 'P', cx: 0.95, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('P')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'A', keytext: 'A', cx: 0.1, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('A')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'S', keytext: 'S', cx: 0.2, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('S')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'D', keytext: 'D', cx: 0.3, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('D')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'F', keytext: 'F', cx: 0.4, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('F')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'G', keytext: 'G', cx: 0.5, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('G')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'H', keytext: 'H', cx: 0.6, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('H')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'J', keytext: 'J', cx: 0.7, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('J')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'K', keytext: 'K', cx: 0.8, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('K')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'L', keytext: 'L', cx: 0.9, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('L')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'Z', keytext: 'Z', cx: 0.2, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('Z')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'X', keytext: 'X', cx: 0.3, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('X')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'C', keytext: 'C', cx: 0.4, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('C')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'V', keytext: 'V', cx: 0.5, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('V')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'B', keytext: 'B', cx: 0.6, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('B')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'N', keytext: 'N', cx: 0.7, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('N')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'M', keytext: 'M', cx: 0.8, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('M')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: SwipeAction.start, onMove: SwipeAction.move, onUp: SwipeAction.up },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'unshift', keytext: '⇪', cx: 0.075, cy: 5/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(0) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'bs', keytext: '⌫', cx: 0.925, cy: 5/8, w: 0.15, h: 0.25,
-                click: Terminal.backspace,
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.delGroupBefore},
-                longpress: {onEnter: RepeatBackspaceAction.start, onMove: RepeatBackspaceAction.move, onUp: RepeatBackspaceAction.up } },
-            {keyid: 'tosym', keytext: '&123', cx: 0.075, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(2) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nl', keytext: '↩', cx: 0.925, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() {Terminal.newLine(); switchLayout(0)},
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: RepeatNewlineAction.start, onMove: RepeatNewlineAction.move, onUp: RepeatNewlineAction.up } },
-            {keyid: 'sp', keytext: ' ', cx: 0.5, cy: 7/8, w: 0.3, h: 0.25,
-                click: Terminal.insert(' '),
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.insertSoftTab},
-                longpress: {onEnter: RepeatSpaceAction.start, onMove: RepeatSpaceAction.move, onUp: RepeatSpaceAction.up } },
-            {keyid: 'dot', keytext: '.', cx: 0.8, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insert('.')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'dash', keytext: '-', cx: 0.7, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insert('-')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'shiftcursor', keytext: '✥', cx: 0.2, cy: 7/8, w:0.1, h: 0.25,
-                click: Terminal.moveCursorLeft,
-                timeout: 500 /*ms*/,
-                swipe: {onEnter: CursorAction.start, onMove: CursorAction.move, onUp: CursorAction.up },
-                longpress: {onEnter: RepeatCursorDownAction.start, onMove: RepeatCursorDownAction.move, onUp: RepeatCursorDownAction.up } },
-            {keyid: 'alt', keytext: 'alt', cx: 0.3, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: function() { switchLayout(5) },
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-        ],
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeUppercaseKey('Q'),
+                makeUppercaseKey('W'),
+                makeUppercaseKey('E'),
+                makeUppercaseKey('R'),
+                makeUppercaseKey('T'),
+                makeUppercaseKey('Y'),
+                makeUppercaseKey('U'),
+                makeUppercaseKey('I'),
+                makeUppercaseKey('O'),
+                makeUppercaseKey('P'),
+            ]),
+            makeKeyRow(0.05, 3/8, [
+                makeUppercaseKey('A'),
+                makeUppercaseKey('S'),
+                makeUppercaseKey('D'),
+                makeUppercaseKey('F'),
+                makeUppercaseKey('G'),
+                makeUppercaseKey('H'),
+                makeUppercaseKey('J'),
+                makeUppercaseKey('K'),
+                makeUppercaseKey('L'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                unshiftKey,
+                makeUppercaseKey('Z'),
+                makeUppercaseKey('X'),
+                makeUppercaseKey('C'),
+                makeUppercaseKey('V'),
+                makeUppercaseKey('B'),
+                makeUppercaseKey('N'),
+                makeUppercaseKey('M'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                tosymKey,
+                cursorKey,
+                altKey,
+                spacebarKey,
+                makeRegularNonSwipableKey('-', 'dash'),
+                makeRegularNonSwipableKey('.', 'dot'),
+                newlineKey,
+            ]),
+        ]),
         // layout 2 - NUMBERS & SYMBOLS
-        [
-            {keyid: 'num1', keytext: '1', cx: 0.05, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('1')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num2', keytext: '2', cx: 0.15, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('2')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num3', keytext: '3', cx: 0.25, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('3')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num4', keytext: '4', cx: 0.35, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('4')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num5', keytext: '5', cx: 0.45, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('5')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num6', keytext: '6', cx: 0.55, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('6')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num7', keytext: '7', cx: 0.65, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('7')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num8', keytext: '8', cx: 0.75, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('8')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num9', keytext: '9', cx: 0.85, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('9')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num0', keytext: '0', cx: 0.95, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('0')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'caret', keytext: '^', cx: 0.05, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('^')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'dollar', keytext: '$', cx: 0.15, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('$')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'asterisk', keytext: '*', cx: 0.25, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('*')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'plus', keytext: '+', cx: 0.35, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('+')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'question', keytext: '?', cx: 0.45, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('?')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'tilde', keytext: '~', cx: 0.55, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('~')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'underscore', keytext: '_', cx: 0.65, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('_')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ampersand', keytext: '&', cx: 0.75, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('&')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'at', keytext: '@', cx: 0.85, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('@')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'colon', keytext: ':', cx: 0.95, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert(':')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'quote', keytext: '\'', cx: 0.20, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('\'')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'doublequote', keytext: '"', cx: 0.30, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('"')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'langlebracket', keytext: '<', cx: 0.40, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('<')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ranglebracket', keytext: '>', cx: 0.50, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('>')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'pipe', keytext: '|', cx: 0.60, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('|')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'backquote', keytext: '`', cx: 0.70, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('`')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'comma', keytext: ',', cx: 0.80, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert(',')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'nextsym', keytext: '→', cx: 0.075, cy: 5/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(3) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'bs', keytext: '⌫', cx: 0.925, cy: 5/8, w: 0.15, h: 0.25,
-                click: Terminal.backspace,
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.delGroupBefore},
-                longpress: {onEnter: RepeatBackspaceAction.start, onMove: RepeatBackspaceAction.move, onUp: RepeatBackspaceAction.up } },
-            {keyid: 'abc', keytext: 'abc', cx: 0.075, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(0) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nl', keytext: '↩', cx: 0.925, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() {Terminal.newLine();},
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: RepeatNewlineAction.start, onMove: RepeatNewlineAction.move, onUp: RepeatNewlineAction.up } },
-            {keyid: 'sp', keytext: ' ', cx: 0.5, cy: 7/8, w: 0.3, h: 0.25,
-                click: Terminal.insert(' '),
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.insertSoftTab},
-                longpress: {onEnter: RepeatSpaceAction.start, onMove: RepeatSpaceAction.move, onUp: RepeatSpaceAction.up } },
-            {keyid: 'slash', keytext: '/', cx: 0.8, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insert('/')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'equal', keytext: '=', cx: 0.7, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insert('=')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'escape', keytext: 'esc', cx: 0.2, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: Terminal.escape,
-                timeout: 500 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-sym1', keytext: 'alt', cx: 0.3, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: function() { switchLayout(6) },
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-        ],
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeRegularNonSwipableKey('1', 'num1'),
+                makeRegularNonSwipableKey('2', 'num2'),
+                makeRegularNonSwipableKey('3', 'num3'),
+                makeRegularNonSwipableKey('4', 'num4'),
+                makeRegularNonSwipableKey('5', 'num5'),
+                makeRegularNonSwipableKey('6', 'num6'),
+                makeRegularNonSwipableKey('7', 'num7'),
+                makeRegularNonSwipableKey('8', 'num8'),
+                makeRegularNonSwipableKey('9', 'num9'),
+                makeRegularNonSwipableKey('0', 'num0'),
+            ]),
+            makeKeyRow(0, 3/8, [
+                makeRegularNonSwipableKey('^', 'caret'),
+                makeRegularNonSwipableKey('$', 'dollar'),
+                makeRegularNonSwipableKey('*', 'asterisk'),
+                makeRegularNonSwipableKey('+', 'plus'),
+                makeRegularNonSwipableKey('?', 'question'),
+                makeRegularNonSwipableKey('~', 'tilde'),
+                makeRegularNonSwipableKey('_', 'underscore'),
+                makeRegularNonSwipableKey('&', 'ampersand'),
+                makeRegularNonSwipableKey('@', 'at'),
+                makeRegularNonSwipableKey(':', 'colon'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                nextsymKey,
+                makeRegularNonSwipableKey('\'', 'quote'),
+                makeRegularNonSwipableKey('"', 'doublequote'),
+                makeRegularNonSwipableKey('<', 'langlebracket'),
+                makeRegularNonSwipableKey('>', 'ranglebracket'),
+                makeRegularNonSwipableKey('|', 'pipe'),
+                makeRegularNonSwipableKey('`', 'backquote'),
+                makeRegularNonSwipableKey(',', 'comma'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                abcKey,
+                escapeKey,
+                altsym1Key,
+                spacebarKey,
+                makeRegularNonSwipableKey('=', 'equal'),
+                makeRegularNonSwipableKey('/', 'slash'),
+                newlineKey,
+            ]),
+        ]),
         // layout 3 - Other Symbols
-        [
-            {keyid: 'num1', keytext: '1', cx: 0.05, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('1')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num2', keytext: '2', cx: 0.15, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('2')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num3', keytext: '3', cx: 0.25, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('3')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num4', keytext: '4', cx: 0.35, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('4')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num5', keytext: '5', cx: 0.45, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('5')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num6', keytext: '6', cx: 0.55, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('6')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num7', keytext: '7', cx: 0.65, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('7')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num8', keytext: '8', cx: 0.75, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('8')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num9', keytext: '9', cx: 0.85, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('9')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'num0', keytext: '0', cx: 0.95, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('0')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'percent', keytext: '%', cx: 0.05, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('%')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'exclaimation', keytext: '!', cx: 0.15, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('!')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'pound', keytext: '#', cx: 0.25, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('#')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'backslash', keytext: '\\', cx: 0.35, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('\\')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'semicolon', keytext: ';', cx: 0.45, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert(';')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'set-font-size', keytext: 'T+', cx: 0.55, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() { Terminal.configFontSize(); },
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nothing2', keytext: ' ', cx: 0.65, cy: 3/8, w: 0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nothing3', keytext: ' ', cx: 0.75, cy: 3/8, w: 0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nothing4', keytext: ' ', cx: 0.85, cy: 3/8, w: 0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nothing5', keytext: ' ', cx: 0.95, cy: 3/8, w: 0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'lparen', keytext: '(', cx: 0.20, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('(')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'rparen', keytext: ')', cx: 0.30, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert(')')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'lbracket', keytext: '[', cx: 0.40, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('[')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'rbracket', keytext: ']', cx: 0.50, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert(']')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'lbrace', keytext: '{', cx: 0.60, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('{')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'rbrace', keytext: '}', cx: 0.70, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insert('}')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'input-text', keytext: '…', cx: 0.80, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.inputNonEnglish();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'prevsym', keytext: '←', cx: 0.075, cy: 5/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(2) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'bs', keytext: '⌫', cx: 0.925, cy: 5/8, w: 0.15, h: 0.25,
-                click: Terminal.backspace,
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.delGroupBefore},
-                longpress: {onEnter: RepeatBackspaceAction.start, onMove: RepeatBackspaceAction.move, onUp: RepeatBackspaceAction.up } },
-            {keyid: 'abc', keytext: 'abc', cx: 0.075, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(0) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nl', keytext: '↩', cx: 0.925, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() {Terminal.newLine();},
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: RepeatNewlineAction.start, onMove: RepeatNewlineAction.move, onUp: RepeatNewlineAction.up } },
-            {keyid: 'sp', keytext: ' ', cx: 0.5, cy: 7/8, w: 0.3, h: 0.25,
-                click: Terminal.insert(' '),
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.insertSoftTab},
-                longpress: {onEnter: RepeatSpaceAction.start, onMove: RepeatSpaceAction.move, onUp: RepeatSpaceAction.up } },
-            {keyid: 'nothing6', keytext: ' ', cx: 0.8, cy: 7/8, w:0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nothing7', keytext: ' ', cx: 0.7, cy: 7/8, w:0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'del', keytext: 'del', cx: 0.2, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: Terminal.deleteKey,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-sym2', keytext: 'alt', cx: 0.3, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: function() { switchLayout(7) },
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-        ],
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeRegularNonSwipableKey('1', 'num1'),
+                makeRegularNonSwipableKey('2', 'num2'),
+                makeRegularNonSwipableKey('3', 'num3'),
+                makeRegularNonSwipableKey('4', 'num4'),
+                makeRegularNonSwipableKey('5', 'num5'),
+                makeRegularNonSwipableKey('6', 'num6'),
+                makeRegularNonSwipableKey('7', 'num7'),
+                makeRegularNonSwipableKey('8', 'num8'),
+                makeRegularNonSwipableKey('9', 'num9'),
+                makeRegularNonSwipableKey('0', 'num0'),
+            ]),
+            makeKeyRow(0, 3/8, [
+                makeRegularNonSwipableKey('%', 'percent'),
+                makeRegularNonSwipableKey('!', 'exclaimation'),
+                makeRegularNonSwipableKey('#', 'pound'),
+                makeRegularNonSwipableKey('\\', 'backslash'),
+                makeRegularNonSwipableKey(';', 'semicolon'),
+                setfontsizeKey,
+                copyKey,
+                pasteKey,
+                makeNothingKey(),
+                makeNothingKey(),
+            ]),
+            makeKeyRow(0, 5/8, [
+                prevsymKey,
+                makeRegularNonSwipableKey('(', 'lparen'),
+                makeRegularNonSwipableKey(')', 'rparen'),
+                makeRegularNonSwipableKey('[', 'lbracket'),
+                makeRegularNonSwipableKey(']', 'rbracket'),
+                makeRegularNonSwipableKey('{', 'lbrace'),
+                makeRegularNonSwipableKey('}', 'rbrace'),
+                inputtextKey,
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                abcKey,
+                delKey,
+                altsym2Key,
+                spacebarKey,
+                makeNothingKey(),
+                makeNothingKey(),
+                newlineKey,
+            ]),
+        ]),
         // layout 4 - Ctrl
-        [
-            {keyid: 'ctrl-q', keytext: 'q', cx: 0.05, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('Q')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-w', keytext: 'w', cx: 0.15, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('W')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-e', keytext: 'e', cx: 0.25, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('E')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-r', keytext: 'r', cx: 0.35, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('R')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-t', keytext: 't', cx: 0.45, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('T')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-y', keytext: 'y', cx: 0.55, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('Y')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-u', keytext: 'u', cx: 0.65, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('U')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-i', keytext: 'i', cx: 0.75, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('I')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-o', keytext: 'o', cx: 0.85, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('O')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-p', keytext: 'p', cx: 0.95, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('P')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-a', keytext: 'a', cx: 0.1, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('A')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-s', keytext: 's', cx: 0.2, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('S')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-d', keytext: 'd', cx: 0.3, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('D')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-f', keytext: 'f', cx: 0.4, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('F')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-g', keytext: 'g', cx: 0.5, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('G')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-h', keytext: 'h', cx: 0.6, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('H')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-j', keytext: 'j', cx: 0.7, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('J')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-k', keytext: 'k', cx: 0.8, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('K')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-l', keytext: 'l', cx: 0.9, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('L')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-z', keytext: 'z', cx: 0.2, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('Z')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-x', keytext: 'x', cx: 0.3, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('X')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-c', keytext: 'c', cx: 0.4, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('C')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-v', keytext: 'v', cx: 0.5, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('V')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-b', keytext: 'b', cx: 0.6, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('B')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-n', keytext: 'n', cx: 0.7, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('N')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'ctrl-m', keytext: 'm', cx: 0.8, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertCtrl('M')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'shift', keytext: '⇧', cx: 0.075, cy: 5/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(1) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'bs', keytext: '⌫', cx: 0.925, cy: 5/8, w: 0.15, h: 0.25,
-                click: Terminal.backspace,
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.delGroupBefore},
-                longpress: {onEnter: RepeatBackspaceAction.start, onMove: RepeatBackspaceAction.move, onUp: RepeatBackspaceAction.up } },
-            {keyid: 'tosym', keytext: '&123', cx: 0.075, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(2) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nl', keytext: '↩', cx: 0.925, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() {Terminal.newLine(); switchLayout(0)},
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: RepeatNewlineAction.start, onMove: RepeatNewlineAction.move, onUp: RepeatNewlineAction.up } },
-            {keyid: 'sp', keytext: ' ', cx: 0.5, cy: 7/8, w: 0.3, h: 0.25,
-                click: Terminal.insert(' '),
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.insertSoftTab},
-                longpress: {onEnter: RepeatSpaceAction.start, onMove: RepeatSpaceAction.move, onUp: RepeatSpaceAction.up } },
-            {keyid: 'dot', keytext: '.', cx: 0.8, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insert('.')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'dash', keytext: '-', cx: 0.7, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insert('-')();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'shiftcursor', keytext: '✥', cx: 0.2, cy: 7/8, w:0.1, h: 0.25,
-                click: Terminal.moveCursorLeft,
-                timeout: 500 /*ms*/,
-                swipe: {onEnter: CursorAction.start, onMove: CursorAction.move, onUp: CursorAction.up },
-                longpress: {onEnter: RepeatCursorDownAction.start, onMove: RepeatCursorDownAction.move, onUp: RepeatCursorDownAction.up } },
-            {keyid: 'unctrl', keytext: 'CTRL', cx: 0.3, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: function() { switchLayout(0) },
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } }
-        ],
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeCtrlKey('q'),
+                makeCtrlKey('w'),
+                makeCtrlKey('e'),
+                makeCtrlKey('r'),
+                makeCtrlKey('t'),
+                makeCtrlKey('y'),
+                makeCtrlKey('u'),
+                makeCtrlKey('i'),
+                makeCtrlKey('o'),
+                makeCtrlKey('p'),
+            ]),
+            makeKeyRow(0.05, 3/8, [
+                makeCtrlKey('a'),
+                makeCtrlKey('s'),
+                makeCtrlKey('d'),
+                makeCtrlKey('f'),
+                makeCtrlKey('g'),
+                makeCtrlKey('h'),
+                makeCtrlKey('j'),
+                makeCtrlKey('k'),
+                makeCtrlKey('l'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                shiftKey,
+                makeCtrlKey('z'),
+                makeCtrlKey('x'),
+                makeCtrlKey('c'),
+                makeCtrlKey('v'),
+                makeCtrlKey('b'),
+                makeCtrlKey('n'),
+                makeCtrlKey('m'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                tosymKey,
+                cursorKey,
+                unctrlKey,
+                spacebarKey,
+                makeRegularNonSwipableKey('-', 'dash'),
+                makeRegularNonSwipableKey('.', 'dot'),
+                newlineKey,
+            ]),
+        ]),
         // layout 5 - ALT Letter
-        [
-            {keyid: 'alt-q', keytext: 'Q', cx: 0.05, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('Q')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-w', keytext: 'W', cx: 0.15, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('W')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-e', keytext: 'E', cx: 0.25, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('E')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-r', keytext: 'R', cx: 0.35, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('R')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-t', keytext: 'T', cx: 0.45, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('T')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-y', keytext: 'Y', cx: 0.55, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('Y')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-u', keytext: 'U', cx: 0.65, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('U')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-i', keytext: 'I', cx: 0.75, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('I')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-o', keytext: 'O', cx: 0.85, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('O')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-p', keytext: 'P', cx: 0.95, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('P')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-a', keytext: 'A', cx: 0.1, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('A')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-s', keytext: 'S', cx: 0.2, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('S')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-d', keytext: 'D', cx: 0.3, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('D')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-f', keytext: 'F', cx: 0.4, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('F')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-g', keytext: 'G', cx: 0.5, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('G')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-h', keytext: 'H', cx: 0.6, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('H')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-j', keytext: 'J', cx: 0.7, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('J')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-k', keytext: 'K', cx: 0.8, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('K')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-l', keytext: 'L', cx: 0.9, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('L')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-z', keytext: 'Z', cx: 0.2, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('Z')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-x', keytext: 'X', cx: 0.3, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('X')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-c', keytext: 'C', cx: 0.4, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('C')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-v', keytext: 'V', cx: 0.5, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('V')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-b', keytext: 'B', cx: 0.6, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('B')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-n', keytext: 'N', cx: 0.7, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('N')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-m', keytext: 'M', cx: 0.8, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('M')(); switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn, },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'shift', keytext: '⇧', cx: 0.075, cy: 5/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(1) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'bs', keytext: '⌫', cx: 0.925, cy: 5/8, w: 0.15, h: 0.25,
-                click: Terminal.backspace,
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.delGroupBefore},
-                longpress: {onEnter: RepeatBackspaceAction.start, onMove: RepeatBackspaceAction.move, onUp: RepeatBackspaceAction.up } },
-            {keyid: 'tosym', keytext: '&123', cx: 0.075, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(2) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nl', keytext: '↩', cx: 0.925, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() {Terminal.newLine(); switchLayout(0)},
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: RepeatNewlineAction.start, onMove: RepeatNewlineAction.move, onUp: RepeatNewlineAction.up } },
-            {keyid: 'sp', keytext: ' ', cx: 0.5, cy: 7/8, w: 0.3, h: 0.25,
-                click: Terminal.insert(' '),
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.insertSoftTab},
-                longpress: {onEnter: RepeatSpaceAction.start, onMove: RepeatSpaceAction.move, onUp: RepeatSpaceAction.up } },
-            {keyid: 'alt-dot', keytext: '.', cx: 0.8, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('.')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-dash', keytext: '-', cx: 0.7, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('-')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'shiftcursor', keytext: '✥', cx: 0.2, cy: 7/8, w:0.1, h: 0.25,
-                click: Terminal.moveCursorLeft,
-                timeout: 500 /*ms*/,
-                swipe: {onEnter: CursorAction.start, onMove: CursorAction.move, onUp: CursorAction.up },
-                longpress: {onEnter: RepeatCursorDownAction.start, onMove: RepeatCursorDownAction.move, onUp: RepeatCursorDownAction.up } },
-            {keyid: 'unalt', keytext: 'ALT', cx: 0.3, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: function() { switchLayout(0) },
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-        ],
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeAltKey('Q'),
+                makeAltKey('W'),
+                makeAltKey('E'),
+                makeAltKey('R'),
+                makeAltKey('T'),
+                makeAltKey('Y'),
+                makeAltKey('U'),
+                makeAltKey('I'),
+                makeAltKey('O'),
+                makeAltKey('P'),
+            ]),
+            makeKeyRow(0.05, 3/8, [
+                makeAltKey('A'),
+                makeAltKey('S'),
+                makeAltKey('D'),
+                makeAltKey('F'),
+                makeAltKey('G'),
+                makeAltKey('H'),
+                makeAltKey('J'),
+                makeAltKey('K'),
+                makeAltKey('L'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                shiftKey,
+                makeAltKey('Z'),
+                makeAltKey('X'),
+                makeAltKey('C'),
+                makeAltKey('V'),
+                makeAltKey('B'),
+                makeAltKey('N'),
+                makeAltKey('M'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                tosymKey,
+                cursorKey,
+                unaltKey,
+                spacebarKey,
+                makeAltKey('-', 'dash'),
+                makeAltKey('.', 'dot'),
+                newlineKey,
+            ]),
+        ]),
         // layout 6 - ALT + NUMBERS & SYMBOLS
-        [
-            {keyid: 'alt-num1', keytext: '1', cx: 0.05, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('1')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num2', keytext: '2', cx: 0.15, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('2')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num3', keytext: '3', cx: 0.25, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('3')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num4', keytext: '4', cx: 0.35, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('4')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num5', keytext: '5', cx: 0.45, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('5')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num6', keytext: '6', cx: 0.55, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('6')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num7', keytext: '7', cx: 0.65, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('7')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num8', keytext: '8', cx: 0.75, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('8')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num9', keytext: '9', cx: 0.85, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('9')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num0', keytext: '0', cx: 0.95, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('0')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'alt-caret', keytext: '^', cx: 0.05, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('^')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-dollar', keytext: '$', cx: 0.15, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('$')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-asterisk', keytext: '*', cx: 0.25, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('*')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-plus', keytext: '+', cx: 0.35, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('+')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-question', keytext: '?', cx: 0.45, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('?')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-tilde', keytext: '~', cx: 0.55, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('~')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-underscore', keytext: '_', cx: 0.65, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('_')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-ampersand', keytext: '&', cx: 0.75, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('&')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-at', keytext: '@', cx: 0.85, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('@')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-colon', keytext: ':', cx: 0.95, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt(':')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'alt-quote', keytext: '\'', cx: 0.20, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('\'')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-doublequote', keytext: '"', cx: 0.30, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('"')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-langlebracket', keytext: '<', cx: 0.40, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('<')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-ranglebracket', keytext: '>', cx: 0.50, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('>')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-pipe', keytext: '|', cx: 0.60, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('|')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-backquote', keytext: '`', cx: 0.70, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('`')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-comma', keytext: ',', cx: 0.80, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt(',')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'alt-nextsym', keytext: '→', cx: 0.075, cy: 5/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(7) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'bs', keytext: '⌫', cx: 0.925, cy: 5/8, w: 0.15, h: 0.25,
-                click: Terminal.backspace,
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.delGroupBefore},
-                longpress: {onEnter: RepeatBackspaceAction.start, onMove: RepeatBackspaceAction.move, onUp: RepeatBackspaceAction.up } },
-            {keyid: 'abc', keytext: 'abc', cx: 0.075, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(0) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nl', keytext: '↩', cx: 0.925, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() {Terminal.newLine();},
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: RepeatNewlineAction.start, onMove: RepeatNewlineAction.move, onUp: RepeatNewlineAction.up } },
-            {keyid: 'sp', keytext: ' ', cx: 0.5, cy: 7/8, w: 0.3, h: 0.25,
-                click: Terminal.insert(' '),
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.insertSoftTab},
-                longpress: {onEnter: RepeatSpaceAction.start, onMove: RepeatSpaceAction.move, onUp: RepeatSpaceAction.up } },
-            {keyid: 'alt-slash', keytext: '/', cx: 0.8, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('/')();switchLayout(0);},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-equal', keytext: '=', cx: 0.7, cy: 7/8, w:0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('=')();switchLayout(0);},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'escape', keytext: 'esc', cx: 0.2, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: Terminal.escape,
-                timeout: 500 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'unalt', keytext: 'ALT', cx: 0.3, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: function() { switchLayout(0) },
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-        ],
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeAltKey('1', 'num1'),
+                makeAltKey('2', 'num2'),
+                makeAltKey('3', 'num3'),
+                makeAltKey('4', 'num4'),
+                makeAltKey('5', 'num5'),
+                makeAltKey('6', 'num6'),
+                makeAltKey('7', 'num7'),
+                makeAltKey('8', 'num8'),
+                makeAltKey('9', 'num9'),
+                makeAltKey('0', 'num0'),
+            ]),
+            makeKeyRow(0, 3/8, [
+                makeAltKey('^', 'caret'),
+                makeAltKey('$', 'dollar'),
+                makeAltKey('*', 'asterisk'),
+                makeAltKey('+', 'plus'),
+                makeAltKey('?', 'question'),
+                makeAltKey('~', 'tilde'),
+                makeAltKey('_', 'underscore'),
+                makeAltKey('&', 'ampersand'),
+                makeAltKey('@', 'at'),
+                makeAltKey(':', 'colon'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                altnextsymKey,
+                makeAltKey('\'', 'quote'),
+                makeAltKey('"', 'doublequote'),
+                makeAltKey('<', 'langlebracket'),
+                makeAltKey('>', 'ranglebracket'),
+                makeAltKey('|', 'pipe'),
+                makeAltKey('`', 'backquote'),
+                makeAltKey(',', 'comma'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                abcKey,
+                escapeKey,
+                unaltKey,
+                spacebarKey,
+                makeAltKey('=', 'equal'),
+                makeAltKey('/', 'slash'),
+                newlineKey,
+            ]),
+        ]),
         // layout 7 - ALT + Other Symbols
-        [
-            {keyid: 'alt-num1', keytext: '1', cx: 0.05, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('1')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num2', keytext: '2', cx: 0.15, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('2')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num3', keytext: '3', cx: 0.25, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('3')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num4', keytext: '4', cx: 0.35, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('4')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num5', keytext: '5', cx: 0.45, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('5')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num6', keytext: '6', cx: 0.55, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('6')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num7', keytext: '7', cx: 0.65, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('7')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num8', keytext: '8', cx: 0.75, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('8')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num9', keytext: '9', cx: 0.85, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('9')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-num0', keytext: '0', cx: 0.95, cy: 1/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('0')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'alt-percent', keytext: '%', cx: 0.05, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('%')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-exclaimation', keytext: '!', cx: 0.15, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('!')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-pound', keytext: '#', cx: 0.25, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('#')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-backslash', keytext: '\\', cx: 0.35, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('\\')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-semicolon', keytext: ';', cx: 0.45, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt(';')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'set-font-size', keytext: 'T+', cx: 0.55, cy: 3/8, w: 0.1, h: 0.25,
-                click: function() { Terminal.configFontSize(); },
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nothing2', keytext: ' ', cx: 0.65, cy: 3/8, w: 0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nothing3', keytext: ' ', cx: 0.75, cy: 3/8, w: 0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nothing4', keytext: ' ', cx: 0.85, cy: 3/8, w: 0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nothing5', keytext: ' ', cx: 0.95, cy: 3/8, w: 0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'alt-lparen', keytext: '(', cx: 0.20, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('(')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-rparen', keytext: ')', cx: 0.30, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt(')')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-lbracket', keytext: '[', cx: 0.40, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('[')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-rbracket', keytext: ']', cx: 0.50, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt(']')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-lbrace', keytext: '{', cx: 0.60, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('{')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'alt-rbrace', keytext: '}', cx: 0.70, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.insertAlt('}')();switchLayout(0)},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'input-text', keytext: '…', cx: 0.80, cy: 5/8, w: 0.1, h: 0.25,
-                click: function() {Terminal.inputNonEnglish();},
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-
-            {keyid: 'alt-prevsym', keytext: '←', cx: 0.075, cy: 5/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(6) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'bs', keytext: '⌫', cx: 0.925, cy: 5/8, w: 0.15, h: 0.25,
-                click: Terminal.backspace,
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.delGroupBefore},
-                longpress: {onEnter: RepeatBackspaceAction.start, onMove: RepeatBackspaceAction.move, onUp: RepeatBackspaceAction.up } },
-            {keyid: 'abc', keytext: 'abc', cx: 0.075, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() { switchLayout(0) },
-                timeout: 99999,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nl', keytext: '↩', cx: 0.925, cy: 7/8, w: 0.15, h: 0.25,
-                click: function() {Terminal.newLine();},
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn},
-                longpress: {onEnter: RepeatNewlineAction.start, onMove: RepeatNewlineAction.move, onUp: RepeatNewlineAction.up } },
-            {keyid: 'sp', keytext: ' ', cx: 0.5, cy: 7/8, w: 0.3, h: 0.25,
-                click: Terminal.insert(' '),
-                timeout: 200,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: Terminal.insertSoftTab},
-                longpress: {onEnter: RepeatSpaceAction.start, onMove: RepeatSpaceAction.move, onUp: RepeatSpaceAction.up } },
-            {keyid: 'nothing8', keytext: ' ', cx: 0.8, cy: 7/8, w:0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'nothing9', keytext: ' ', cx: 0.7, cy: 7/8, w:0.1, h: 0.25,
-                click: nullfn,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'del', keytext: 'del', cx: 0.2, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: Terminal.deleteKey,
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-            {keyid: 'unalt', keytext: 'ALT', cx: 0.3, cy: 7/8, w:0.1, h: 0.25, fontSize: '1.5rem',
-                click: function() { switchLayout(0) },
-                timeout: 400 /*ms*/,
-                swipe: {onEnter: nullfn, onMove: nullfn, onUp: nullfn },
-                longpress: {onEnter: nullfn, onMove: nullfn, onUp: nullfn } },
-        ],
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeAltKey('1', 'num1'),
+                makeAltKey('2', 'num2'),
+                makeAltKey('3', 'num3'),
+                makeAltKey('4', 'num4'),
+                makeAltKey('5', 'num5'),
+                makeAltKey('6', 'num6'),
+                makeAltKey('7', 'num7'),
+                makeAltKey('8', 'num8'),
+                makeAltKey('9', 'num9'),
+                makeAltKey('0', 'num0'),
+            ]),
+            makeKeyRow(0, 3/8, [
+                makeAltKey('%', 'percent'),
+                makeAltKey('!', 'exclaimation'),
+                makeAltKey('#', 'pound'),
+                makeAltKey('\\', 'backslash'),
+                makeAltKey(';', 'semicolon'),
+                setfontsizeKey,
+                makeNothingKey(),
+                makeNothingKey(),
+                makeNothingKey(),
+                makeNothingKey(),
+            ]),
+            makeKeyRow(0, 5/8, [
+                altprevsymKey,
+                makeAltKey('(', 'lparen'),
+                makeAltKey(')', 'rparen'),
+                makeAltKey('[', 'lbracket'),
+                makeAltKey(']', 'rbracket'),
+                makeAltKey('{', 'lbrace'),
+                makeAltKey('}', 'rbrace'),
+                inputtextKey,
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                abcKey,
+                delKey,
+                unaltKey,
+                spacebarKey,
+                makeNothingKey(),
+                makeNothingKey(),
+                newlineKey,
+            ]),
+        ]),
     ]
-    var _layoutsSVG = [] //*svg group* for each layout
-    var _width = 600 //of svg doc
-    var _height = 240 //of svg doc
+    _layoutsConfig['vim'] = [
+        // layout 0
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeRegularKey('q'),
+                makeRegularKey('w'),
+                makeRegularKey('e'),
+                makeRegularKey('r'),
+                makeRegularKey('t'),
+                makeRegularKey('y'),
+                makeRegularKey('u'),
+                makeRegularKey('i'),
+                makeRegularKey('o'),
+                modifyKeyLongPress(makeRegularKey('p'), tmuxShortcutFn('p')),
+            ]),
+            makeKeyRow(0.05, 3/8, [
+                makeRegularKey('a'),
+                makeRegularKey('s'),
+                makeRegularKey('d'),
+                makeRegularKey('f'),
+                makeRegularKey('g'),
+                makeRegularKey('h'),
+                makeRegularKey('j'),
+                makeRegularKey('k'),
+                makeRegularKey('l'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                shiftKey,
+                makeRegularKey('z'),
+                makeRegularKey('x'),
+                makeRegularKey('c'),
+                makeRegularKey('v'),
+                makeRegularKey('b'),
+                modifyKeyLongPress(makeRegularKey('n'), tmuxShortcutFn('n')),
+                makeRegularKey('m'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                tosymKey,
+                cursorKey,
+                ctrlKey,
+                spacebarKey,
+                makeRegularNonSwipableKey(',', 'comma'),
+                makeRegularNonSwipableKey('.', 'dot'),
+                newlineKey,
+            ])
+
+        ]),
+        // layout 1 - SHIFT
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeUppercaseKey('Q'),
+                makeUppercaseKey('W'),
+                makeUppercaseKey('E'),
+                makeUppercaseKey('R'),
+                makeUppercaseKey('T'),
+                makeUppercaseKey('Y'),
+                makeUppercaseKey('U'),
+                makeUppercaseKey('I'),
+                makeUppercaseKey('O'),
+                makeUppercaseKey('P'),
+            ]),
+            makeKeyRow(0.05, 3/8, [
+                makeUppercaseKey('A'),
+                makeUppercaseKey('S'),
+                makeUppercaseKey('D'),
+                makeUppercaseKey('F'),
+                makeUppercaseKey('G'),
+                makeUppercaseKey('H'),
+                makeUppercaseKey('J'),
+                makeUppercaseKey('K'),
+                makeUppercaseKey('L'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                unshiftKey,
+                makeUppercaseKey('Z'),
+                makeUppercaseKey('X'),
+                makeUppercaseKey('C'),
+                makeUppercaseKey('V'),
+                makeUppercaseKey('B'),
+                makeUppercaseKey('N'),
+                makeUppercaseKey('M'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                tosymKey,
+                cursorKey,
+                altKey,
+                spacebarKey,
+                makeRegularNonSwipableKey(',', 'comma'),
+                makeRegularNonSwipableKey('.', 'dot'),
+                newlineKey,
+            ]),
+        ]),
+        // layout 2 - NUMBERS & SYMBOLS
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeRegularNonSwipableKey('1', 'num1'),
+                makeRegularNonSwipableKey('2', 'num2'),
+                makeRegularNonSwipableKey('3', 'num3'),
+                makeRegularNonSwipableKey('4', 'num4'),
+                makeRegularNonSwipableKey('5', 'num5'),
+                makeRegularNonSwipableKey('6', 'num6'),
+                makeRegularNonSwipableKey('7', 'num7'),
+                makeRegularNonSwipableKey('8', 'num8'),
+                makeRegularNonSwipableKey('9', 'num9'),
+                makeRegularNonSwipableKey('0', 'num0'),
+            ]),
+            makeKeyRow(0, 3/8, [
+                makeRegularNonSwipableKey('(', 'lparen'),
+                makeRegularNonSwipableKey(')', 'rparen'),
+                makeRegularNonSwipableKey('{', 'lbrace'),
+                makeRegularNonSwipableKey('}', 'rbrace'),
+                makeRegularNonSwipableKey('[', 'lbracket'),
+                makeRegularNonSwipableKey(']', 'rbracket'),
+                makeRegularNonSwipableKey('+', 'plus'),
+                makeRegularNonSwipableKey('-', 'dash'),
+                makeRegularNonSwipableKey('*', 'asterisk'),
+                makeRegularNonSwipableKey('/', 'slash'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                nextsymKey,
+                makeRegularNonSwipableKey(';', 'semicolon'),
+                makeRegularNonSwipableKey(':', 'colon'),
+                makeRegularNonSwipableKey('\'', 'quote'),
+                makeRegularNonSwipableKey('"', 'doublequote'),
+                makeRegularNonSwipableKey('<', 'langlebracket'),
+                makeRegularNonSwipableKey('>', 'ranglebracket'),
+                makeRegularNonSwipableKey('_', 'underscore'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                abcKey,
+                escapeKey,
+                altsym1Key,
+                spacebarKey,
+                makeRegularNonSwipableKey('=', 'equal'),
+                makeNothingKey(),
+                newlineKey,
+            ]),
+        ]),
+        // layout 3 - Other Symbols
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeRegularNonSwipableKey('1', 'num1'),
+                makeRegularNonSwipableKey('2', 'num2'),
+                makeRegularNonSwipableKey('3', 'num3'),
+                makeRegularNonSwipableKey('4', 'num4'),
+                makeRegularNonSwipableKey('5', 'num5'),
+                makeRegularNonSwipableKey('6', 'num6'),
+                makeRegularNonSwipableKey('7', 'num7'),
+                makeRegularNonSwipableKey('8', 'num8'),
+                makeRegularNonSwipableKey('9', 'num9'),
+                makeRegularNonSwipableKey('0', 'num0'),
+            ]),
+            makeKeyRow(0, 3/8, [
+                makeRegularNonSwipableKey('#', 'pound'),
+                makeRegularNonSwipableKey('%', 'percent'),
+                makeRegularNonSwipableKey('$', 'dollar'),
+                makeRegularNonSwipableKey('\\', 'backslash'),
+                makeRegularNonSwipableKey('`', 'backquote'),
+                makeRegularNonSwipableKey('^', 'caret'),
+                setfontsizeKey,
+                copyKey,
+                pasteKey,
+                makeNothingKey(),
+            ]),
+            makeKeyRow(0, 5/8, [
+                prevsymKey,
+                makeRegularNonSwipableKey('&', 'ampersand'),
+                makeRegularNonSwipableKey('|', 'pipe'),
+                makeRegularNonSwipableKey('!', 'exclaimation'),
+                makeRegularNonSwipableKey('~', 'tilde'),
+                makeRegularNonSwipableKey('@', 'at'),
+                makeRegularNonSwipableKey('?', 'question'),
+                inputtextKey,
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                abcKey,
+                delKey,
+                altsym2Key,
+                spacebarKey,
+                makeNothingKey(),
+                makeNothingKey(),
+                newlineKey,
+            ]),
+        ]),
+        // layout 4 - Ctrl
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeCtrlKey('q'),
+                makeCtrlKey('w'),
+                makeCtrlKey('e'),
+                makeCtrlKey('r'),
+                makeCtrlKey('t'),
+                makeCtrlKey('y'),
+                makeCtrlKey('u'),
+                makeCtrlKey('i'),
+                makeCtrlKey('o'),
+                makeCtrlKey('p'),
+            ]),
+            makeKeyRow(0.05, 3/8, [
+                makeCtrlKey('a'),
+                makeCtrlKey('s'),
+                makeCtrlKey('d'),
+                makeCtrlKey('f'),
+                makeCtrlKey('g'),
+                makeCtrlKey('h'),
+                makeCtrlKey('j'),
+                makeCtrlKey('k'),
+                makeCtrlKey('l'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                shiftKey,
+                makeCtrlKey('z'),
+                makeCtrlKey('x'),
+                makeCtrlKey('c'),
+                makeCtrlKey('v'),
+                makeCtrlKey('b'),
+                makeCtrlKey('n'),
+                makeCtrlKey('m'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                tosymKey,
+                cursorKey,
+                unctrlKey,
+                spacebarKey,
+                makeRegularNonSwipableKey(',', 'comma'),
+                makeRegularNonSwipableKey('.', 'dot'),
+                newlineKey,
+            ]),
+        ]),
+        // layout 5 - ALT Letter
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeAltKey('Q'),
+                makeAltKey('W'),
+                makeAltKey('E'),
+                makeAltKey('R'),
+                makeAltKey('T'),
+                makeAltKey('Y'),
+                makeAltKey('U'),
+                makeAltKey('I'),
+                makeAltKey('O'),
+                makeAltKey('P'),
+            ]),
+            makeKeyRow(0.05, 3/8, [
+                makeAltKey('A'),
+                makeAltKey('S'),
+                makeAltKey('D'),
+                makeAltKey('F'),
+                makeAltKey('G'),
+                makeAltKey('H'),
+                makeAltKey('J'),
+                makeAltKey('K'),
+                makeAltKey('L'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                shiftKey,
+                makeAltKey('Z'),
+                makeAltKey('X'),
+                makeAltKey('C'),
+                makeAltKey('V'),
+                makeAltKey('B'),
+                makeAltKey('N'),
+                makeAltKey('M'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                tosymKey,
+                cursorKey,
+                unaltKey,
+                spacebarKey,
+                makeAltKey(',', 'comma'),
+                makeAltKey('.', 'dot'),
+                newlineKey,
+            ]),
+        ]),
+        // layout 6 - ALT + NUMBERS & SYMBOLS
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeAltKey('1', 'num1'),
+                makeAltKey('2', 'num2'),
+                makeAltKey('3', 'num3'),
+                makeAltKey('4', 'num4'),
+                makeAltKey('5', 'num5'),
+                makeAltKey('6', 'num6'),
+                makeAltKey('7', 'num7'),
+                makeAltKey('8', 'num8'),
+                makeAltKey('9', 'num9'),
+                makeAltKey('0', 'num0'),
+            ]),
+            makeKeyRow(0, 3/8, [
+                makeAltKey('(', 'lparen'),
+                makeAltKey(')', 'rparen'),
+                makeAltKey('{', 'lbrace'),
+                makeAltKey('}', 'rbrace'),
+                makeAltKey('[', 'lbracket'),
+                makeAltKey(']', 'rbracket'),
+                makeAltKey('+', 'plus'),
+                makeAltKey('-', 'dash'),
+                makeAltKey('*', 'asterisk'),
+                makeAltKey('/', 'slash'),
+            ]),
+            makeKeyRow(0, 5/8, [
+                nextsymKey,
+                makeAltKey(';', 'semicolon'),
+                makeAltKey(':', 'colon'),
+                makeAltKey('\'', 'quote'),
+                makeAltKey('"', 'doublequote'),
+                makeAltKey('<', 'langlebracket'),
+                makeAltKey('>', 'ranglebracket'),
+                makeAltKey('_', 'underscore'),
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                abcKey,
+                escapeKey,
+                unaltKey,
+                spacebarKey,
+                makeAltKey('=', 'equal'),
+                makeNothingKey(),
+                newlineKey,
+            ]),
+        ]),
+        // layout 7 - ALT + Other Symbols
+        _.flatten([
+            makeKeyRow(0, 1/8, [
+                makeAltKey('1', 'num1'),
+                makeAltKey('2', 'num2'),
+                makeAltKey('3', 'num3'),
+                makeAltKey('4', 'num4'),
+                makeAltKey('5', 'num5'),
+                makeAltKey('6', 'num6'),
+                makeAltKey('7', 'num7'),
+                makeAltKey('8', 'num8'),
+                makeAltKey('9', 'num9'),
+                makeAltKey('0', 'num0'),
+            ]),
+            makeKeyRow(0, 3/8, [
+                makeAltKey('#', 'pound'),
+                makeAltKey('%', 'percent'),
+                makeAltKey('$', 'dollar'),
+                makeAltKey('\\', 'backslash'),
+                makeAltKey('`', 'backquote'),
+                makeAltKey('^', 'caret'),
+                setfontsizeKey,
+                makeNothingKey(),
+                makeNothingKey(),
+                makeNothingKey(),
+            ]),
+            makeKeyRow(0, 5/8, [
+                prevsymKey,
+                makeRegularNonSwipableKey('&', 'ampersand'),
+                makeRegularNonSwipableKey('|', 'pipe'),
+                makeRegularNonSwipableKey('!', 'exclaimation'),
+                makeRegularNonSwipableKey('~', 'tilde'),
+                makeRegularNonSwipableKey('@', 'at'),
+                makeRegularNonSwipableKey('?', 'question'),
+                inputtextKey,
+                backspaceKey,
+            ]),
+            makeKeyRow(0, 7/8, [
+                abcKey,
+                delKey,
+                unaltKey,
+                spacebarKey,
+                makeNothingKey(),
+                makeNothingKey(),
+                newlineKey,
+            ]),
+        ]),
+    ]
+    var _layoutsSVG = {} //*svg group* for each layout
+    Object.keys(_layoutsConfig).forEach(function(mode) { _layoutsSVG[mode] = [] })
+    var _width = $('#container').width() //of svg doc
+    var _height = $('#container').height() //of svg doc
     var _keyboardSVG //the outermost svg doc
     var _canvas
     var _ctx
@@ -2039,17 +1675,21 @@ var Keyboard = (function (Terminal, Analyzer) {
         _ctx.clearRect(0,0,_canvas.width, _canvas.height)
     }
 
-    var isPtWithinKey = function (pt, key) {
-        return pt.x >= key.cx-key.w/2
-            && pt.x <= key.cx+key.w/2
-            && pt.y >= key.cy-key.h/2
-            && pt.y <= key.cy+key.h/2
+    var isPtWithinKey = function (pt, key, isSwipe) {
+        // bw, bh (boundary width/height) is used by cursor key to allow entering
+        // the swipe state with less distance
+        var dw = isSwipe && key.bw ? key.bw/2 : key.w/2
+        var dh = isSwipe && key.bh ? key.bh/2 : key.h/2
+        return pt.x >= key.cx-dw
+            && pt.x <= key.cx+dw
+            && pt.y >= key.cy-dh
+            && pt.y <= key.cy+dh
     }
 
     var getKeyUnderPoint = function (pt) {
-        for(var i = 0; i < _layoutsConfig[_currLayout].length; i++) {
-            var key = _layoutsConfig[_currLayout][i]
-            if(isPtWithinKey(pt, key)) {
+        for(var i = 0; i < _layoutsConfig[_currMode][_currLayout].length; i++) {
+            var key = _layoutsConfig[_currMode][_currLayout][i]
+            if(isPtWithinKey(pt, key, false)) {
                 return key
             }
         }
@@ -2062,17 +1702,17 @@ var Keyboard = (function (Terminal, Analyzer) {
         var kbdh = _height
         var layout = _keyboardSVG.group()
         layout.attr('id','layout-'+String(ith))
-        _layoutsSVG[ith] = layout
+        _layoutsSVG[_currMode][ith] = layout
 
-        for(var i = 0; i < _layoutsConfig[ith].length; i++) {
-            var key = _layoutsConfig[ith][i]
+        for(var i = 0; i < _layoutsConfig[_currMode][ith].length; i++) {
+            var key = _layoutsConfig[_currMode][ith][i]
             var keyrect = layout
                             .rect(kbdw*key.w, kbdh*key.h)
                             .fill({ color: '#f0f0f0' })
                             .stroke({width: 2, color: '#ffffff'})
                             .center(key.cx*kbdw, key.cy*kbdh)
 
-            var fontSize = key.fontSize || '2rem'
+            var fontSize = key.fontSize || '1.7rem'
 
             var keytext = layout
                             .text(key.keytext)
@@ -2086,48 +1726,37 @@ var Keyboard = (function (Terminal, Analyzer) {
         layout.hide() //initially all layouts are hidden
     }
 
-    var initLayouts = function() {
-        var kbdw = _width
-        var kbdh = _height
-        for(var cnt = 0; cnt < _layoutsConfig.length; cnt++) {
-            var layout = _keyboardSVG.group()
-            layout.attr('id','layout-'+String(cnt))
-            _layoutsSVG.push(layout)
-
-            for(var i = 0; i < _layoutsConfig[cnt].length; i++) {
-                var key = _layoutsConfig[cnt][i]
-                var keyrect = layout
-                                .rect(kbdw*key.w, kbdh*key.h)
-                                .fill({ color: '#f0f0f0' })
-                                .stroke({width: 2, color: '#ffffff'})
-                                .center(key.cx*kbdw, key.cy*kbdh)
-
-                var fontSize = key.fontSize || '2rem'
-
-                var keytext = layout
-                                .text(key.keytext)
-                                .font({ size: fontSize, family: 'Helvetica' })
-                                .center(key.cx*kbdw, key.cy*kbdh)
-
-                var keygroup = layout.group().add(keyrect).add(keytext)
-                keygroup.attr('id',key.keyid+'-key')
-            }
-
-            layout.hide() //initially all layouts are hidden
-        }
-    }
-
     var switchLayout = function(num) {
-        if(_layoutsSVG[_currLayout]) {
-            _layoutsSVG[_currLayout].hide()
+        if(_layoutsSVG[_currMode][_currLayout]) {
+            _layoutsSVG[_currMode][_currLayout].hide()
         }
 
-        if(!_layoutsSVG[num]) {
+        if(!_layoutsSVG[_currMode][num]) {
             initLayout(num)
         }
 
-        _layoutsSVG[num].show()
+        _layoutsSVG[_currMode][num].show()
         _currLayout = num
+    }
+
+    var switchMode = function(mode) {
+        if(!mode in _layoutsSVG) return
+        if(_layoutsSVG[_currMode][_currLayout]) {
+            _layoutsSVG[_currMode][_currLayout].hide()
+        }
+
+        _currMode = mode
+        var num = _currLayout
+        if(!_layoutsSVG[_currMode][num]) {
+            initLayout(num)
+        }
+
+        _layoutsSVG[_currMode][num].show()
+        _currLayout = num
+    }
+
+    var isUpperCase = function() {
+        return _currLayout === 1
     }
 
     // The event object
@@ -2181,7 +1810,7 @@ var Keyboard = (function (Terminal, Analyzer) {
             ptrId = evt.pointerId
 
             // highlight the key
-            currHighlight = _layoutsSVG[_currLayout].node.querySelector('#'+downState.key.keyid+'-key rect')
+            currHighlight = _layoutsSVG[_currMode][_currLayout].node.querySelector('#'+downState.key.keyid+'-key rect')
 
             currHighlight.style.fill = '#cccccc'
 
@@ -2199,7 +1828,7 @@ var Keyboard = (function (Terminal, Analyzer) {
 
             if(state === INITIAL_STATE) {
                 // INITIAL STATE mouse move out of downState key
-                if(!isPtWithinKey(currPt, downState.key)) {
+                if(!isPtWithinKey(currPt, downState.key, true)) {
                     window.clearTimeout(timeoutEvent)
                     currHighlight.style.fill = '#f0f0f0'  //dehighlight
 
@@ -2218,7 +1847,7 @@ var Keyboard = (function (Terminal, Analyzer) {
 
         var pointerUpEvent = function (evt) {
             evt.stopPropagation()
-            if((state === NOT_PRESSED) || (evt.pointerId !== ptrId)) return
+            if(evt.type !== 'touchcancel' && (state === NOT_PRESSED || evt.pointerId !== ptrId)) return
             var offsetY = evt.pageY - evt.currentTarget.offsetParent.offsetTop
             var offsetX = evt.pageX - evt.currentTarget.offsetParent.offsetLeft
             var currPt = {x: offsetX/_canvas.width, y:offsetY/_canvas.height}
@@ -2250,6 +1879,17 @@ var Keyboard = (function (Terminal, Analyzer) {
             _canvas.addEventListener('pointermove', pointerMoveEvent)
             _canvas.addEventListener('pointerup',   pointerUpEvent)
             _canvas.addEventListener('pointerout',  pointerUpEvent) //proper clean up
+            // touchcancel needed by mobile Safari when it does not fire pointerup event
+            // when swiping from screen edge into the keyboard
+            _canvas.addEventListener('touchcancel',  pointerUpEvent)
+
+            // magic to disable ios safari double-tap to zoom
+            // for other browser the touch-action:none css should have prevented that
+            // REF: https://stackoverflow.com/a/56393464
+            _canvas.addEventListener("click", function (event) {
+                event.preventDefault()
+                event.stopPropagation()
+            })
         }
 
         return {
@@ -2270,15 +1910,15 @@ var Keyboard = (function (Terminal, Analyzer) {
 
     var initialize = function(container) {
         _div = container.querySelector('div')
-        _keyboardSVG = SVG(_div).attr('viewBox', '0 0 ' + String(_width) + ' ' + String(_height))
-
-        // initLayouts()
+        _keyboardSVG = SVG(_div).attr('viewBox', '0 0 ' + String(_width) + ' ' + String(_height)).attr('preserveAspectRatio', 'none')
 
         // to prevent the unnecessary scrollbar appearing on IE
         // whenever there are <text> with center greater than
         // some weird threshold
         // see http://stackoverflow.com/questions/16093240/ie10-on-windows-7-svg-scrolling-too-far-when-inside-a-div
         _keyboardSVG.style('overflow:hidden')
+        _keyboardSVG.style('width:100%')
+        _keyboardSVG.style('height:100%')
 
         _canvas = container.querySelector('canvas')
         _ctx = _canvas.getContext('2d')
@@ -2293,8 +1933,54 @@ var Keyboard = (function (Terminal, Analyzer) {
 
     return {
         initialize: initialize,
-        resize: resizeEvent
+        resize: resizeEvent,
+        isUpperCase: isUpperCase,
+        switchMode: switchMode,
     }
 })(Terminal, Analyzer)
 Keyboard.initialize(document.getElementById('container'))
 
+// REF: https://stackoverflow.com/a/30810322
+function copyTextToClipboard(text) {
+    var textArea = document.createElement("textarea");
+    textArea.value = text;
+
+    // Avoid scrolling to bottom
+    textArea.style.top = "0";
+    textArea.style.left = "0";
+    textArea.style.position = "fixed";
+
+    document.body.appendChild(textArea);
+    // FIXME: the following sometimes cause OS keyboard pop up and make screen flash
+    textArea.focus();
+    textArea.select();
+
+    try {
+        var successful = document.execCommand('copy');
+        var msg = successful ? 'successful' : 'unsuccessful';
+    } catch (err) {
+        console.error('Fallback: Oops, unable to copy', err);
+    }
+
+    document.body.removeChild(textArea);
+}
+
+// Copy selection to clipboard automatically
+term.onSelectionChange(function(ev) {
+    var sel = term.getSelection()
+    if(sel.length > 0) {
+        copyTextToClipboard(sel)
+    }
+})
+
+// Enable drop to "paste" to terminal
+term.element.parentElement.addEventListener('dragover', function(evt) { evt.preventDefault() })
+term.element.parentElement.addEventListener('drop', function(evt) {
+    evt.preventDefault()
+    var data = evt.dataTransfer.getData('text')
+    if(data.length > 0) {
+        if (data.indexOf('\n') > -1 &&
+            !confirm(`New line detected, are you sure?\n\n${data.slice(0, 100)}...`)) return
+        Terminal.insertWord(data, true)
+    }
+})

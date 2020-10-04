@@ -34,12 +34,14 @@ The difference is that the Web-based UI is designed to use on mobile phone and h
 **Table Of Content:**
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+<!-- run with  doctoc \-\-maxlevel 2 README.md -->
 
 
 - [Features](#features)
 - [Installation](#installation)
 - [NOTE ON SECURITY](#note-on-security)
 - [Limitations](#limitations)
+- [NeoVim Autocomplete support](#neovim-autocomplete-support)
 - [Tmux support setting](#tmux-support-setting)
 - [Termux support setting](#termux-support-setting)
 - [FAQ, User Manual, Tips](#faq-user-manual-tips)
@@ -52,10 +54,11 @@ The difference is that the Web-based UI is designed to use on mobile phone and h
 1. Open-source & self-hosted
 1. Web-based client, works on Chrome on Android and Safari on iOS
 1. Autocomplete suggestion for commands and path names just like when you type Tab in Bash, works with Bash completion installed on the server (eg: git status, git log)
-1. Swipe gesture input for commands
+1. Swipe gesture input
     - support partial path so that you don't need to swipe the whole gesture for long commands, i.e., swiping 'user' would likely to suggest 'useradd', 'userdel', etc
 1. Works for bash inside Tmux (See `Tmux support setting` below)
 1. Works on Termux on Android (See `Termux support setting` below)
+1. NeoVim autocomplete (See `NeoVim Autocomplete support` below)
 
 
 
@@ -75,7 +78,7 @@ Requirements:
 1. bash
     - version tested: 4.2 - 4.4
     - the `bash` that comes with most Linux distros (eg: Ubuntu 16.04/18.04, Debian stretch 9.7, CentOS 7.6, Fedora 29 are tested) should work with Swell.sh, unless you've overridden the system default one with your own compiled version
-1. python 3.5+, virtualenv, pip
+1. python 3.6+, virtualenv, pip
 1. `bash-completion` package - [https://github.com/scop/bash-completion](https://github.com/scop/bash-completion) (optional, but highly recommended, maybe pre-installed on your system but if not, could be easily installed from most distro's package manager)
 1. `ptrace_scope` setting as follow:
 
@@ -133,11 +136,31 @@ These are the current limitations, some maybe fixed in future update. PR welcome
 - The PATH env var is not refreshed, i.e. the autocomplete suggestion would not detect change in PATH and add new executables for suggestions
 - Possibly more... see Issue page
 
+## NeoVim Autocomplete support
+
+Swell.sh will detect if the running program is NeoVim, and will hook into NeoVim's API to show autocomplete in the keyboard. The keyboard layout will also adjust for programming language input
+
+** Requires NeoVim version 0.4.0+ **
+
+[coc.nvim](https://github.com/neoclide/coc.nvim) and [TabNine-vim](https://github.com/codota/tabnine-vim) are tested to work with Swell.sh (TabNine provides better autocomplete but is not open-source and requires lots of memory to run)
+
+NOTE:
+- only nvim is supported, vim is NOT supported due to lack of needed API
+- if nvim is not detected (you get error message in Web UI or server log), you can also try specifying the NeoVim listening UNIX socket explicitly by `nvim --listen /some/abs/path <file>`, note you must specify an absolute path (eg: `mktemp -u`) for the unix socket, relative path won't work
+- for Termux and Android 10+, you must use `--listen` for it to work
+
+If your system NeoVim installation does not work with Swell.sh, you can optionally install it separately under the repo directory (NOT applicable to Termux):
+1. Download latest NeoVim `nvim-linux64.tar.gz` from https://github.com/neovim/neovim/releases into the repo root and extract it
+1. Install TabNine-vim or coc.nvim by cloning into `./nvim-linux64/`
+    - coc.nvim requires node.js and npm, and you need to run `npm install` in `./nvim-linux64/coc.nvim` after cloning to finish the installtion
+1. Edit `./nvim-linux64/init.vim` and add your vim settings
+1. Run Swell.sh with `./run-with-env.sh`, this script will add `./nvim-linux64/bin` to PATH and use `./nvim-linux64/init.vim` as the NeoVim config, so that it will not interfere with your global NeoVim config
+1. If you use Tmux and run Swell.sh with `./run-with-env.sh`, you will need to add `set-option -ga update-environment ' PATH VIMINIT'` to `~/.tmux.conf` for the env vars to be passed down to the bash spawned by Tmux, PS changing tmux.conf requires killing all existing sessions and restart Tmux for the new settings to take effect
 
 
 ## Tmux support setting
 
-NOTE: this section is NOT applicable to Termux on Android, see the section below
+NOTE: if you are using Tmux in Termux on Android, you do not need to apply the `cap_sys_ptrace` setting below
 
 If you want the autocomplete suggestion to work for bash inside Tmux, please do the following:
 
@@ -152,7 +175,9 @@ If you want the autocomplete suggestion to work for bash inside Tmux, please do 
     NOTE: you have to attach to the tmux session using the above command in order for Swell.sh to work.  
     If you create a new session, please detach from it then re-attach to it using the above command. Otherwise the autocomplete suggestion bar will not update.
 
-Tips: Adding `set -g mouse on` to your `~/.tmux.conf` to allow touch in Tmux, useful for switching between windows/panes
+Tips:
+- Adding `set -g mouse on` to your `~/.tmux.conf` to allow touch in Tmux, useful for switching between windows/panes
+- You can long-press 'n' or 'p' key to quickly switch between next/previous window
 
 ## Termux support setting
 
@@ -204,10 +229,19 @@ A: Click ⇧ (Shift) to switch layout to Uppercase, then click 'alt', when that 
 A: Click a key 'T+'
 
 ##### Q: How to type Non-English text?
-A: Click '…' Key then input in the text box using the mobile OS's keyboard 
+A: Click '🌐' Key then input in the text box using the mobile OS's keyboard
 
 ##### Q: Programs like `htop`/`vim` are not using full screen space:
 A: Try changing font size or running the `resize`/`resizecons` command, which could be obtained from `kbd` package on Ubuntu
+
+##### Q: How to copy text on terminal?
+1. Double tap to select the text, it will be automatically copied to clipboard (Chrome only)
+2. Click '✂️' key, it will pop up the terminal text content in a new window where you can select text to copy (limitation: control characters are also in the output)
+
+##### Q: How to paste text on terminal?
+1. Click '📋' key (Works only on Chrome and must be https/localhost)
+2. Click '🌐' Key then input in the text box
+3. You can also drag text from another window onto the terminal to paste text (eg: using Tablet split screens)
 
 ##### Tips
 - You can to set the Bash prompt to shorter for more space for typing the commands, by `export PS1='$ '`
@@ -220,7 +254,7 @@ See ACKNOWLEDGEMENT.md
 
 ## Licence
 
-Copyright (c) 2019 Choi Wai Chung
+Copyright (c) 2019 - 2020 Choi Wai Chung
 
 AGPL version 3
 

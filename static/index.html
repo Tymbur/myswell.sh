@@ -16,15 +16,17 @@
     <link rel="stylesheet" href="lib/iziToast.min.css" />
 
     <script src="lib/xterm/xterm.js"></script>
-    <script src="lib/xterm/addons/terminado/terminado.js"></script>
-    <script src="lib/xterm/addons/fit/fit.js"></script>
+    <script src="lib/xterm/addons/xterm-addon-terminado.js"></script>
+    <script src="lib/xterm/addons/xterm-addon-fit.js"></script>
+    <script src="lib/xterm/addons/xterm-addon-webgl.js"></script>
+    <script src="lib/xterm/addons/xterm-addon-serialize.js"></script>
 
     <script src="lib/jquery-2.1.3.min.js"></script>
     <script src="lib/svg.min.js"></script>
     <script src="lib/es6-promise.auto.min.js"></script>
     <script src="lib/PEP.min.js"></script>
     <script src="lib/lodash.min.js"></script>
-    <script src="lib/reconnecting-websocket.min.js"></script>
+    <script src="lib/robust-websocket.min.js"></script>
     <script src="lib/iziToast.min.js"></script>
     <script src="lib/fastclick.js"></script>
 
@@ -60,18 +62,28 @@
 <script>
 var completerWrapHeight = document.querySelector('div#completerWrap').clientHeight
 var completerElem = document.querySelector('div#completer')
-completerElem.style.fontSize = completerWrapHeight/2 + 'px'
+completerElem.style.fontSize = (completerWrapHeight/2 + 2) + 'px'
 completerElem.style.lineHeight = completerWrapHeight + 'px'
+completerElem.style.fontFamily = 'Helvetica'
 
 window.oncontextmenu = function() { return false; } // disable the annoying right-click menu on Touch screen on long press
 </script>
 
+<script>
+window.DEFAULT_FONT_SIZE = 20
+</script>
 <script src="preapp.js"></script>
 <script src="app.js"></script>
 <script>
 $(function() {
     FastClick.attach(document.querySelector('div#completer'));
 })
+window.addEventListener('beforeunload', function (e) {
+    // Cancel the event
+    e.preventDefault(); // If you prevent default behavior in Mozilla Firefox prompt will always be shown
+    // Chrome requires returnValue to be set
+    e.returnValue = '';
+});
 </script>
 
 <style>
