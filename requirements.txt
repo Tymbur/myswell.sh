@@ -7,7 +7,7 @@ msgpack==1.0.0
 ptyprocess==0.6.0
 pyelftools==0.25
 Pygments==2.7.2
-ring==0.7.3
+ring==0.10.1
 six==1.15.0
 tenacity==5.0.3
 terminado==0.8.1
