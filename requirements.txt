@@ -9,7 +9,7 @@ pyelftools==0.25
 Pygments==2.7.2
 ring==0.7.3
 six==1.15.0
-tenacity==5.0.3
+tenacity==8.2.3
 terminado==0.8.1
 tornado==6.0.4
 wirerope==0.3.0
