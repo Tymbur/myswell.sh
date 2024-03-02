@@ -3,7 +3,7 @@ ansimarkup==1.4.0
 better-exceptions-fork==0.2.1.post6
 colorama==0.4.3
 loguru==0.2.5
-msgpack==1.0.0
+msgpack==1.0.8
 ptyprocess==0.6.0
 pyelftools==0.25
 Pygments==2.7.2
